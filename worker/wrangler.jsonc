@@ -6,8 +6,38 @@
   "compatibility_flags": [
     "nodejs_compat"
   ],
+  "rules": [
+    {
+      "type": "Text",
+      "globs": [
+        "src/assets/panel-worker.bundle.js"
+      ]
+    },
+    {
+      "type": "Text",
+      "globs": [
+        "migrations/*.sql"
+      ]
+    }
+  ],
   "assets": {
     "directory": "../frontend/dist",
     "not_found_handling": "single-page-application"
-  }
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "JOBS",
+        "class_name": "DeployJob"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "DeployJob"
+      ]
+    }
+  ]
 }
