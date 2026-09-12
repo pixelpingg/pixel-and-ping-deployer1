@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "pixel-and-ping-deployer",
+  "name": "pixel-and-ping-deployer1",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-31",
   "compatibility_flags": [
@@ -11,12 +11,6 @@
       "type": "Text",
       "globs": [
         "src/assets/panel-worker.bundle.js"
-      ]
-    },
-    {
-      "type": "Text",
-      "globs": [
-        "migrations/*.sql"
       ]
     }
   ],
