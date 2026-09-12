@@ -61,11 +61,6 @@ var require_bcrypt = __commonJS({
       var bcrypt3 = {};
       var randomFallback = null;
       function random(len) {
-        if (typeof module !== "undefined" && module && module["exports"])
-          try {
-            return __require("crypto")["randomBytes"](len);
-          } catch (e) {
-          }
         try {
           var a;
           (self["crypto"] || self["msCrypto"])["getRandomValues"](a = new Uint32Array(len));
@@ -1862,18 +1857,59 @@ var require_plugin_crypto = __commonJS({
   "../node_modules/@otplib/plugin-crypto/index.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
-    function _interopDefault(ex) {
-      return ex && typeof ex === "object" && "default" in ex ? ex["default"] : ex;
+
+    function rotl(x, n) { return (x << n) | (x >>> (32 - n)); }
+    function sha1(bytes) {
+      var len = bytes.length, bitLen = len * 8, total = ((len + 9 + 63) >> 6) << 6;
+      var m = new Uint8Array(total); m.set(bytes); m[len] = 128;
+      var dv = new DataView(m.buffer);
+      dv.setUint32(total - 4, bitLen >>> 0);
+      var h0 = 1732584193, h1 = 4023233417, h2 = 2562383102, h3 = 271733878, h4 = 3285377520;
+      var w = new Uint32Array(80);
+      for (var off = 0; off < total; off += 64) {
+        for (var i = 0; i < 16; i++) w[i] = dv.getUint32(off + i * 4);
+        for (var i = 16; i < 80; i++) w[i] = rotl(w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16], 1) >>> 0;
+        var a=h0,b=h1,c=h2,d=h3,e=h4;
+        for (var i = 0; i < 80; i++) {
+          var f,k;
+          if (i < 20) { f=(b&c)|((~b)&d); k=1518500249; }
+          else if (i < 40) { f=b^c^d; k=1859775393; }
+          else if (i < 60) { f=(b&c)|(b&d)|(c&d); k=2400959708; }
+          else { f=b^c^d; k=3395469782; }
+          var temp=(rotl(a,5)+f+e+k+w[i])>>>0; e=d; d=c; c=rotl(b,30)>>>0; b=a; a=temp;
+        }
+        h0=(h0+a)>>>0; h1=(h1+b)>>>0; h2=(h2+c)>>>0; h3=(h3+d)>>>0; h4=(h4+e)>>>0;
+      }
+      var out = new Uint8Array(20), hv=[h0,h1,h2,h3,h4];
+      for (var j=0;j<5;j++) { out[j*4]=hv[j]>>>24; out[j*4+1]=hv[j]>>>16; out[j*4+2]=hv[j]>>>8; out[j*4+3]=hv[j]; }
+      return out;
     }
-    var crypto2 = _interopDefault(__require("crypto"));
-    var createDigest = (algorithm, hmacKey2, counter) => {
-      const hmac = crypto2.createHmac(algorithm, Buffer.from(hmacKey2, "hex"));
-      const digest = hmac.update(Buffer.from(counter, "hex")).digest();
-      return digest.toString("hex");
-    };
-    var createRandomBytes = (size, encoding) => {
-      return crypto2.randomBytes(size).toString(encoding);
-    };
+    function hexBytes(s) {
+      var out = new Uint8Array(s.length / 2);
+      for (var i=0;i<out.length;i++) out[i]=parseInt(s.substr(i*2,2),16);
+      return out;
+    }
+    function hmacSha1(key, msg) {
+      if (key.length > 64) key = sha1(key);
+      var k = new Uint8Array(64); k.set(key);
+      var inner = new Uint8Array(64 + msg.length), outer = new Uint8Array(64 + 20);
+      for (var i=0;i<64;i++) { inner[i]=k[i]^54; outer[i]=k[i]^92; }
+      inner.set(msg,64); outer.set(sha1(inner),64); return sha1(outer);
+    }
+    function toHex(bytes) {
+      var s=""; for (var i=0;i<bytes.length;i++) s += bytes[i].toString(16).padStart(2,"0"); return s;
+    }
+    function createDigest(algorithm, hmacKey2, counter) {
+      if (String(algorithm).toLowerCase() !== "sha1") throw new Error("Cloudflare-compatible TOTP supports SHA1 only");
+      return toHex(hmacSha1(hexBytes(hmacKey2), hexBytes(counter)));
+    }
+    function createRandomBytes(size, encoding) {
+      var a = new Uint8Array(size);
+      (self.crypto || self.msCrypto).getRandomValues(a);
+      if (encoding === "hex") return toHex(a);
+      if (encoding === "base64") { var s=""; for (var i=0;i<a.length;i++) s+=String.fromCharCode(a[i]); return btoa(s); }
+      return new TextDecoder().decode(a);
+    }
     exports.createDigest = createDigest;
     exports.createRandomBytes = createRandomBytes;
   }
@@ -4873,34 +4909,7 @@ var require_sha256 = __commonJS({
         return method;
       };
       var nodeWrap = function(method, is224) {
-        var crypto2 = __require("crypto");
-        var Buffer2 = require_buffer().Buffer;
-        var algorithm = is224 ? "sha224" : "sha256";
-        var bufferFrom;
-        if (Buffer2.from && !root.JS_SHA256_NO_BUFFER_FROM) {
-          bufferFrom = Buffer2.from;
-        } else {
-          bufferFrom = function(message) {
-            return new Buffer2(message);
-          };
-        }
-        var nodeMethod = function(message) {
-          if (typeof message === "string") {
-            return crypto2.createHash(algorithm).update(message, "utf8").digest("hex");
-          } else {
-            if (message === null || message === void 0) {
-              throw new Error(ERROR);
-            } else if (message.constructor === ArrayBuffer) {
-              message = new Uint8Array(message);
-            }
-          }
-          if (Array.isArray(message) || ArrayBuffer.isView(message) || message.constructor === Buffer2) {
-            return crypto2.createHash(algorithm).update(bufferFrom(message)).digest("hex");
-          } else {
-            return method(message);
-          }
-        };
-        return nodeMethod;
+        return method;
       };
       var createHmacOutputMethod = function(outputType, is224) {
         return function(key, message) {
