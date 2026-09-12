@@ -1,7 +1,7 @@
 import migration1 from "../migrations/0001_init.sql";
 import migration2 from "../migrations/0002_profile.sql";
 import migration3 from "../migrations/0003_front_ips.sql";
-import panelWorkerCode from "./assets/panel-worker.bundle.js";
+import panelWorkerCode from "./assets/panel-worker.bundle.txt";
 
 const CF_API = "https://api.cloudflare.com/client/v4";
 const TOKEN_URL = "https://dash.cloudflare.com/profile/api-tokens";
