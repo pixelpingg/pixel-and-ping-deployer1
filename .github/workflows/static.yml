@@ -35,7 +35,7 @@ jobs:
       - name: Build PIXEL & PING
         working-directory: frontend
         env:
-          VITE_API_BASE_URL: https://pixel-and-ping-deployer1.mmvhbv.workers.dev
+          VITE_API_BASE_URL: https://pixel-and-ping-deployer1.fbtby.workers.dev
         run: npm run build
 
       - name: Setup Pages
