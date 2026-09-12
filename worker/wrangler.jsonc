@@ -11,7 +11,8 @@
       "type": "Text",
       "globs": [
         "src/assets/panel-worker.bundle.js"
-      ]
+      ],
+      "fallthrough": true
     }
   ],
   "assets": {
