@@ -11,6 +11,9 @@ type Account = { id: string; name: string; type?: string };
 type Mode = "idle" | "accounts" | "deploying" | "ready" | "error";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
+const BASE_URL = import.meta.env.BASE_URL;
+const LOGO_URL = `${BASE_URL}pixel-ping-logo.png`;
+const DASHBOARD_IMAGE_URL = `${BASE_URL}pixel-ping-dashboard.png`;
 const DASHBOARD_URL = "https://dash.cloudflare.com/";
 const TOKEN_URL = "https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_kv_storage%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22d1%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22workers_subdomain%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_analytics%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22user_details%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22memberships%22%2C%22type%22%3A%22read%22%7D%5D&accountId=*&zoneId=all&name=PIXEL%20%26%20PING";
 
@@ -206,7 +209,7 @@ export default function App() {
 
       <header className="orbit-nav">
         <a className="brand" href="#top">
-          <span className="brand-symbol"><img src="/pixel-ping-logo.png" alt="" /></span>
+          <span className="brand-symbol"><img src={LOGO_URL} alt="PIXEL & PING" /></span>
           <span>PIXEL &amp; PING</span>
         </a>
         <nav className="nav-links" aria-label="Primary">
@@ -345,7 +348,7 @@ export default function App() {
           <div className="dashboard-wrap" style={{transform:`translate3d(${motion.x}px,${motion.y}px,0) rotateX(${motion.rx}deg) rotateY(${motion.ry}deg)`}}>
             <div className="dashboard-frame">
               <div className="browser-bar"><span className="window-dots"><i/><i/><i/></span><span className="browser-title">pixel &amp; ping</span><span className="browser-status">LIVE</span></div>
-              <div className="dashboard-image"><img src="/pixel-ping-dashboard.png" alt="Pixel & Ping dashboard"/></div>
+              <div className="dashboard-image"><img src={DASHBOARD_IMAGE_URL} alt="Pixel & Ping dashboard"/></div>
             </div>
           </div>
 
