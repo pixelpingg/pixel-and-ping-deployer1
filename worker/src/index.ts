@@ -4,39 +4,58 @@ import migration3 from "../migrations/0003_front_ips.sql";
 import panelWorkerCode from "./assets/panel-worker.bundle.js";
 
 const CF_API = "https://api.cloudflare.com/client/v4";
-const TOKEN_URL = "https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_kv_storage%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22d1%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22workers_subdomain%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_analytics%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22user_details%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22memberships%22%2C%22type%22%3A%22read%22%7D%5D&accountId=*&zoneId=all&name=PIXEL%20%26%20PING";
-const MIGRATIONS = [migration1, migration2, migration3];
+const TOKEN_URL = "https://dash.cloudflare.com/profile/api-tokens";
 
+const MIGRATIONS = [migration1, migration2, migration3];
 type Account = { id: string; name: string; type?: string };
 type JobState = { status: "RUNNING" | "READY" | "FAILED"; step: string; result?: unknown; error?: string };
 type Env = { JOBS: DurableObjectNamespace; ASSETS: Fetcher };
 
-function json(body: unknown, status = 200, origin = "") {
-  const headers = new Headers({ "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
-  if (origin && (origin === new URL(origin).origin || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin))) headers.set("access-control-allow-origin", origin);
-  return new Response(JSON.stringify(body), { status, headers });
+function json(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+    },
+  });
 }
-
 function cors(request: Request, response: Response) {
   const origin = request.headers.get("Origin");
   if (!origin) return response;
+  const allowed = origin === new URL(request.url).origin || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+  if (!allowed) return response;
   const headers = new Headers(response.headers);
   headers.set("access-control-allow-origin", origin);
   headers.set("access-control-allow-methods", "GET,POST,OPTIONS");
   headers.set("access-control-allow-headers", "content-type");
   headers.set("access-control-max-age", "600");
+  headers.set("vary", "Origin");
   return new Response(response.body, { status: response.status, headers });
 }
-
-function clientIp(request: Request) { return request.headers.get("CF-Connecting-IP") || "unknown"; }
-function randomBytes(length: number) { const b = new Uint8Array(length); crypto.getRandomValues(b); return b; }
+function randomBytes(length: number) {
+  const bytes = new Uint8Array(length);
+  crypto.getRandomValues(bytes);
+  return bytes;
+}
 function randomPassword(length = 20) {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*";
   return Array.from(randomBytes(length), b => alphabet[b % alphabet.length]).join("");
 }
-function randomSecret(bytes = 48) { return btoa(String.fromCharCode(...randomBytes(bytes))); }
-function scriptName(accountId: string) { return `pixelping-${accountId.slice(0, 6).toLowerCase()}-${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}`.slice(0, 63); }
-
+function randomSecret(bytes = 48) {
+  return btoa(String.fromCharCode(...randomBytes(bytes)));
+}
+function scriptName(accountId: string) {
+  return `pixelping-${accountId.slice(0, 6).toLowerCase()}-${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}`.slice(0, 63);
+}
+function panelSource(): string {
+  const value: any = panelWorkerCode as any;
+  if (typeof value === "string") return value;
+  if (typeof value?.default === "string") return value.default;
+  if (typeof value?.default?.default === "string") return value.default.default;
+  throw new Error("Panel Worker bundle was not loaded as text.");
+}
 async function cf(token: string, path: string, init: RequestInit = {}, attempt = 1): Promise<any> {
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${token}`);
@@ -49,13 +68,11 @@ async function cf(token: string, path: string, init: RequestInit = {}, attempt =
     return cf(token, path, init, attempt + 1);
   }
   if (!response.ok || body?.success === false) {
-    const e = new Error(body?.errors?.[0]?.message || `Cloudflare API error ${response.status}`) as Error & { status?: number };
-    e.status = response.status;
-    throw e;
+    const error = Object.assign(new Error(body?.errors?.[0]?.message || `Cloudflare API error ${response.status}`), { status: response.status });
+    throw error;
   }
   return body.result;
 }
-
 async function verifyToken(token: string) {
   const verification = await cf(token, "/user/tokens/verify");
   if (verification?.status !== "active") throw new Error("Cloudflare says this API token is not active.");
@@ -64,7 +81,9 @@ async function verifyToken(token: string) {
   try {
     for (let page = 1; page <= 10; page++) {
       const rows = await cf(token, `/memberships?status=accepted&per_page=50&page=${page}`);
-      for (const membership of rows || []) if (membership?.account?.id && membership?.account?.name) accounts.push(membership.account);
+      for (const membership of rows || []) {
+        if (membership?.account?.id && membership?.account?.name) accounts.push(membership.account);
+      }
       if (!rows || rows.length < 50) break;
     }
   } catch {
@@ -74,10 +93,11 @@ async function verifyToken(token: string) {
       if (!rows || rows.length < 50) break;
     }
   }
-  const unique = [...new Map(accounts.filter(a => a?.id && a?.name).map(a => [a.id, { id: a.id, name: a.name, type: a.type }])).values()];
-  return { email: user?.email || null, accounts: unique.slice(0, 100) };
+  return {
+    email: user?.email || null,
+    accounts: [...new Map(accounts.filter(a => a?.id && a?.name).map(a => [a.id, { id: a.id, name: a.name, type: a.type }])).values()].slice(0, 100),
+  };
 }
-
 async function d1Query(token: string, accountId: string, dbId: string, sql: string, params: unknown[] = []) {
   return cf(token, `/accounts/${accountId}/d1/database/${dbId}/query`, { method: "POST", body: JSON.stringify({ sql, params }) });
 }
@@ -128,7 +148,7 @@ async function uploadWorker(token: string, accountId: string, name: string, d1Id
   };
   const form = new FormData();
   form.append("metadata", JSON.stringify(metadata));
-  form.append("worker.js", new Blob([panelWorkerCode], { type: "application/javascript+module" }), "worker.js");
+  form.append("worker.js", new Blob([panelSource()], { type: "application/javascript+module" }), "worker.js");
   await cf(token, `/accounts/${accountId}/workers/scripts/${name}`, { method: "PUT", body: form });
 }
 async function enableSubdomain(token: string, accountId: string, name: string) {
@@ -136,105 +156,109 @@ async function enableSubdomain(token: string, accountId: string, name: string) {
 }
 async function healthCheck(url: string) {
   let last = "no response";
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 10; i++) {
     try {
-      const r = await fetch(`${url}/api/health`, { headers: { accept: "application/json" } });
-      if (r.ok) { const body = await r.json().catch(() => null); if (body?.ok === true) return; }
-      last = `HTTP ${r.status}`;
-    } catch (e) { last = e instanceof Error ? e.message : String(e); }
+      const response = await fetch(`${url}/api/health`, { headers: { accept: "application/json" } });
+      const body = await response.json().catch(() => null);
+      if (response.ok && body?.ok === true) return;
+      last = `HTTP ${response.status}`;
+    } catch (error) {
+      last = error instanceof Error ? error.message : String(error);
+    }
     await new Promise(r => setTimeout(r, 1500));
   }
   throw new Error(`Panel health check failed: ${last}`);
 }
-function safeError(err: unknown) {
-  const status = Number((err as any)?.status || 0);
-  if (status === 401 || status === 403) return "Cloudflare rejected this token. Check that it is active and has the required Workers, KV, D1, Workers.dev, User Details and Membership permissions.";
+function safeError(error: unknown) {
+  const status = Number((error as any)?.status || 0);
+  if (status === 401 || status === 403) return "Cloudflare rejected this token. Check Workers Scripts, KV, D1, Workers.dev, User Details and Membership permissions.";
   if (status === 429) return "Cloudflare rate limit reached. Please wait a little and try again.";
-  return err instanceof Error ? err.message : "Deployment failed.";
+  return error instanceof Error ? error.message : "Deployment failed.";
 }
 
 export class DeployJob implements DurableObject {
   constructor(private state: DurableObjectState, private env: Env) {}
   async fetch(request: Request): Promise<Response> {
-    const url = new URL(request.url);
-    if (request.method === "GET") return new Response(JSON.stringify((await this.state.storage.get<JobState>("job")) || { status: "FAILED", step: "validate", error: "Deployment job not found." }), { headers: { "content-type": "application/json", "cache-control": "no-store" } });
-    if (request.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
-    const payload = await request.json() as { token: string; accountId: string; sourceUrl: string };
+    if (request.method === "GET") {
+      return new Response(JSON.stringify((await this.state.storage.get<JobState>("job")) || { status:"FAILED",step:"validate",error:"Deployment job not found." }), { headers:{"content-type":"application/json","cache-control":"no-store"} });
+    }
+    if (request.method !== "POST") return new Response("Method Not Allowed",{status:405});
+    const payload = await request.json() as {token:string;accountId:string;sourceUrl:string};
     const current = await this.state.storage.get<JobState>("job");
-    if (current?.status === "RUNNING") return new Response("already-running", { status: 409 });
-    await this.state.storage.put<JobState>("job", { status: "RUNNING", step: "validate" });
-    request = new Request(request.url, { method: "POST" });
-    this.state.waitUntil(this.run(payload).catch(async err => { await this.state.storage.put<JobState>("job", { status: "FAILED", step: "validate", error: safeError(err) }); }));
-    return new Response("started", { status: 202 });
+    if (current?.status === "RUNNING") return new Response("already-running",{status:409});
+    await this.state.storage.put<JobState>("job",{status:"RUNNING",step:"validate"});
+    this.state.waitUntil(this.run(payload));
+    return new Response("started",{status:202});
   }
-  private async set(step: string) { const j = await this.state.storage.get<JobState>("job"); await this.state.storage.put("job", { ...(j || { status: "RUNNING" }), status: "RUNNING", step }); }
-  private async run({ token, accountId, sourceUrl }: { token: string; accountId: string; sourceUrl: string }) {
+  private async set(step:string) {
+    const current = await this.state.storage.get<JobState>("job");
+    await this.state.storage.put<JobState>("job",{...(current || {status:"RUNNING"}),status:"RUNNING",step});
+  }
+  private async run({token,accountId,sourceUrl}:{token:string;accountId:string;sourceUrl:string}) {
+    let step = "validate";
     try {
       const verified = await verifyToken(token);
-      if (!verified.accounts.some(a => a.id === accountId)) throw Object.assign(new Error("This token cannot access the selected Cloudflare account."), { status: 403 });
+      if (!verified.accounts.some(a => a.id === accountId)) throw Object.assign(new Error("This token cannot access the selected Cloudflare account."),{status:403});
       const name = scriptName(accountId);
       const password = randomPassword();
-      await this.set("d1");
-      const d1Id = await createD1(token, accountId, `${name}-db`);
-      await this.set("migrations");
-      await runMigrations(token, accountId, d1Id);
-      await this.set("kv");
-      const kvId = await createKv(token, accountId, `${name}-kv`);
-      await this.set("subdomain_lookup");
-      const subdomain = await getOrCreateSubdomain(token, accountId);
+      step = "d1"; await this.set(step);
+      const d1Id = await createD1(token,accountId,`${name}-db`);
+      step = "migrations"; await this.set(step);
+      await runMigrations(token,accountId,d1Id);
+      step = "kv"; await this.set(step);
+      const kvId = await createKv(token,accountId,`${name}-kv`);
+      step = "subdomain_lookup"; await this.set(step);
+      const subdomain = await getOrCreateSubdomain(token,accountId);
       const panelUrl = `https://${name}.${subdomain}.workers.dev`;
-      await this.set("script");
-      await uploadWorker(token, accountId, name, d1Id, kvId, sourceUrl, password, subdomain);
-      await this.set("enable_subdomain");
-      await enableSubdomain(token, accountId, name);
-      await this.set("admin");
+      step = "script"; await this.set(step);
+      await uploadWorker(token,accountId,name,d1Id,kvId,sourceUrl,password,subdomain);
+      step = "enable_subdomain"; await this.set(step);
+      await enableSubdomain(token,accountId,name);
+      step = "admin"; await this.set(step);
       await healthCheck(panelUrl);
-      await this.state.storage.put<JobState>("job", { status: "READY", step: "admin", result: { url: panelUrl, username: "admin", password } });
-    } catch (err) {
-      await this.state.storage.put<JobState>("job", { status: "FAILED", step: "validate", error: safeError(err) });
+      await this.state.storage.put<JobState>("job",{status:"READY",step:"admin",result:{url:panelUrl,username:"admin",password}});
+    } catch (error) {
+      await this.state.storage.put<JobState>("job",{status:"FAILED",step,error:safeError(error)});
     }
   }
 }
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+  async fetch(request:Request,env:Env) {
     const url = new URL(request.url);
-    const origin = request.headers.get("Origin") || "";
-    if (request.method === "OPTIONS") return cors(request, new Response(null, { status: 204 }));
+    if (request.method === "OPTIONS") return cors(request,new Response(null,{status:204}));
     try {
-      if (request.method === "GET" && url.pathname === "/api/health") return cors(request, json({ ok: true, service: "pixel-ping-deployer", runtime: "cloudflare-workers" }, 200, origin));
+      if (request.method === "GET" && url.pathname === "/api/health") return cors(request,json({ok:true,service:"pixel-ping-deployer",runtime:"cloudflare-workers"}));
       if (request.method === "POST" && url.pathname === "/api/verify") {
-        const body = await request.json().catch(() => ({})) as any;
+        const body = await request.json().catch(()=>({})) as any;
         const token = String(body.token || "").trim();
-        if (token.length < 20 || token.length > 500) return cors(request, json({ error: "Please paste a valid Cloudflare API token." }, 400, origin));
-        const verified = await verifyToken(token);
-        return cors(request, json({ ...verified, tokenUrl: TOKEN_URL }, 200, origin));
+        if (token.length < 20 || token.length > 500) return cors(request,json({error:"Please paste a valid Cloudflare API token."},400));
+        return cors(request,json(await verifyToken(token)));
       }
       if (request.method === "POST" && url.pathname === "/api/deploy") {
-        const body = await request.json().catch(() => ({})) as any;
+        const body = await request.json().catch(()=>({})) as any;
         const token = String(body.token || "").trim();
         const accountId = String(body.accountId || "").trim();
-        if (token.length < 20 || token.length > 500) return cors(request, json({ error: "Invalid Cloudflare API token." }, 400, origin));
-        if (!/^[a-f0-9]{32}$/i.test(accountId)) return cors(request, json({ error: "Invalid Cloudflare account selection." }, 400, origin));
+        if (token.length < 20 || token.length > 500) return cors(request,json({error:"Invalid Cloudflare API token."},400));
+        if (!/^[a-f0-9]{32}$/i.test(accountId)) return cors(request,json({error:"Invalid Cloudflare account selection."},400));
         const verified = await verifyToken(token);
-        if (!verified.accounts.some(a => a.id === accountId)) return cors(request, json({ error: "This token cannot access the selected Cloudflare account." }, 403, origin));
+        if (!verified.accounts.some(a=>a.id===accountId)) return cors(request,json({error:"This token cannot access the selected Cloudflare account."},403));
         const id = crypto.randomUUID();
         const stub = env.JOBS.get(env.JOBS.idFromName(id));
-        const sourceUrl = `${url.origin}`;
-        await stub.fetch("https://job/start", { method: "POST", body: JSON.stringify({ token, accountId, sourceUrl }) });
-        return cors(request, json({ jobId: id }, 202, origin));
+        await stub.fetch("https://job/start",{method:"POST",body:JSON.stringify({token,accountId,sourceUrl:url.origin})});
+        return cors(request,json({jobId:id},202));
       }
       if (request.method === "GET" && url.pathname.startsWith("/api/jobs/")) {
         const id = url.pathname.slice("/api/jobs/".length);
-        if (!/^[0-9a-f-]{36}$/i.test(id)) return cors(request, json({ error: "Deployment job not found." }, 404, origin));
+        if (!/^[0-9a-f-]{36}$/i.test(id)) return cors(request,json({error:"Deployment job not found."},404));
         const stub = env.JOBS.get(env.JOBS.idFromName(id));
         const response = await stub.fetch("https://job/status");
-        return cors(request, new Response(response.body, { status: response.status, headers: response.headers }));
+        return cors(request,new Response(response.body,{status:response.status,headers:response.headers}));
       }
       if (!url.pathname.startsWith("/api/")) return env.ASSETS.fetch(request);
-      return cors(request, json({ error: "Not found" }, 404, origin));
-    } catch (err) {
-      return cors(request, json({ error: safeError(err) }, 500, origin));
+      return cors(request,json({error:"Not found"},404));
+    } catch (error) {
+      return cors(request,json({error:safeError(error)},500));
     }
   }
 };
