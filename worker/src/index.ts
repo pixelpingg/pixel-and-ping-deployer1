@@ -24,7 +24,10 @@ function json(body: unknown, status = 200) {
 function cors(request: Request, response: Response) {
   const origin = request.headers.get("Origin");
   if (!origin) return response;
-  const allowed = origin === new URL(request.url).origin || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+  const allowed =
+  origin === "https://pixelpingg.github.io" ||
+  origin === new URL(request.url).origin ||
+  /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
   if (!allowed) return response;
   const headers = new Headers(response.headers);
   headers.set("access-control-allow-origin", origin);
