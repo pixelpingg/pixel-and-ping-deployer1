@@ -1,0 +1,16 @@
+{
+  "name": "pixel-and-ping-deployer",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "PIXEL & PING — one-page Cloudflare panel deployer, Replit/GitHub ready.",
+  "scripts": {
+    "build": "npm run build:frontend",
+    "build:frontend": "npm --prefix frontend run build",
+    "start": "node server.mjs",
+    "dev": "npm run build && node server.mjs"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3"
+  }
+}
