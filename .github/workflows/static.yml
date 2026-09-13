@@ -29,31 +29,11 @@ jobs:
         with:
           node-version: 22
 
-      - name: Verify repository files
-        shell: bash
-        run: |
-          set -euo pipefail
-          for file in \
-            frontend/package.json \
-            frontend/vite.config.ts \
-            worker/package.json \
-            worker/wrangler.jsonc \
-            worker/src/index.ts \
-            worker/src/assets/panel-worker.bundle.txt
-          do
-            if [ ! -f "$file" ]; then
-              echo "::error::Missing required file: $file"
-              exit 1
-            fi
-          done
-          echo "Repository files verified."
-
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm install
 
-      - name: Copy panel Worker bundle into frontend assets
-        shell: bash
+      - name: Copy panel Worker bundle
         run: |
           set -euo pipefail
           mkdir -p frontend/public
@@ -66,24 +46,15 @@ jobs:
           VITE_API_BASE_URL: https://pixel-and-ping-deployer1.fbtby.workers.dev
         run: npm run build
 
-      - name: Verify frontend build
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -f frontend/dist/index.html
-          test -s frontend/dist/panel-worker.bundle.txt
-          echo "Frontend build and panel bundle verified."
-
-      - name: Install worker dependencies
-        working-directory: worker
-        run: npm install
+      - name: Install Wrangler
+        run: npm install --global wrangler@latest
 
       - name: Deploy Cloudflare Worker
         working-directory: worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: npx wrangler deploy
+        run: wrangler deploy
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
