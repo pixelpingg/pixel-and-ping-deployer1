@@ -24,20 +24,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package.json
 
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm install
 
-      - name: Copy panel Worker bundle
+      - name: Prepare panel Worker bundle
+        shell: bash
         run: |
           set -euo pipefail
+
+          test -f worker/src/assets/panel-worker.bundle.txt
+
           mkdir -p frontend/public
-          cp worker/src/assets/panel-worker.bundle.txt frontend/public/panel-worker.bundle.txt
+
+          cp \
+            worker/src/assets/panel-worker.bundle.txt \
+            frontend/public/panel-worker.bundle.txt
+
           test -s frontend/public/panel-worker.bundle.txt
 
       - name: Build frontend
@@ -46,8 +56,21 @@ jobs:
           VITE_API_BASE_URL: https://pixel-and-ping-deployer1.fbtby.workers.dev
         run: npm run build
 
+      - name: Verify frontend build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f frontend/dist/index.html
+          test -s frontend/dist/panel-worker.bundle.txt
+
+          echo "Frontend build verified."
+
       - name: Install Wrangler
-        run: npm install --global wrangler@latest
+        run: npm install --global wrangler@4.131.1
+
+      - name: Verify Wrangler
+        run: wrangler --version
 
       - name: Deploy Cloudflare Worker
         working-directory: worker
@@ -56,7 +79,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: wrangler deploy
 
-      - name: Upload Pages artifact
+      - name: Upload GitHub Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: frontend/dist
@@ -71,6 +94,6 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
-      - name: Deploy to GitHub Pages
+      - name: Deploy GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
