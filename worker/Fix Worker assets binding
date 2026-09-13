@@ -10,13 +10,14 @@
     {
       "type": "Text",
       "globs": [
-        "src/assets/panel-worker.bundle.txt"
+        "src/migrations/*.sql"
       ],
       "fallthrough": true
     }
   ],
   "assets": {
     "directory": "../frontend/dist",
+    "binding": "ASSETS",
     "not_found_handling": "single-page-application"
   },
   "durable_objects": {
