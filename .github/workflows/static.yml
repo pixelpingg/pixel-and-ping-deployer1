@@ -29,24 +29,33 @@ jobs:
         with:
           node-version: 22
 
-      - name: Verify required files
+      - name: Verify repository files
         shell: bash
         run: |
-          set -e
-          test -f frontend/package-lock.json
-          test -f worker/src/index.ts
-          test -f worker/wrangler.jsonc
-          test -f worker/src/assets/panel-worker.bundle.txt
-          echo "Required files verified."
+          set -euo pipefail
+          for file in \
+            frontend/package.json \
+            frontend/vite.config.ts \
+            worker/package.json \
+            worker/wrangler.jsonc \
+            worker/src/index.ts \
+            worker/src/assets/panel-worker.bundle.txt
+          do
+            if [ ! -f "$file" ]; then
+              echo "::error::Missing required file: $file"
+              exit 1
+            fi
+          done
+          echo "Repository files verified."
 
       - name: Install frontend dependencies
         working-directory: frontend
-        run: npm ci
+        run: npm install
 
       - name: Copy panel Worker bundle into frontend assets
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           mkdir -p frontend/public
           cp worker/src/assets/panel-worker.bundle.txt frontend/public/panel-worker.bundle.txt
           test -s frontend/public/panel-worker.bundle.txt
@@ -57,12 +66,13 @@ jobs:
           VITE_API_BASE_URL: https://pixel-and-ping-deployer1.fbtby.workers.dev
         run: npm run build
 
-      - name: Verify frontend bundle asset
+      - name: Verify frontend build
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+          test -f frontend/dist/index.html
           test -s frontend/dist/panel-worker.bundle.txt
-          echo "Panel Worker bundle is present in frontend/dist."
+          echo "Frontend build and panel bundle verified."
 
       - name: Install worker dependencies
         working-directory: worker
