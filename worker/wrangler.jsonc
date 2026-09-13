@@ -10,7 +10,7 @@
     {
       "type": "Text",
       "globs": [
-        "src/migrations/*.sql"
+        "migrations/*.sql"
       ],
       "fallthrough": true
     }
