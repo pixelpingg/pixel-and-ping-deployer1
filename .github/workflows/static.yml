@@ -173,7 +173,7 @@ jobs:
           p.write_text(s, encoding="utf-8")
           PY
 
-      - name: Add hard panel verification and ASSETS binding
+      - name: Add ASSETS binding to panel upload metadata
         shell: bash
         run: |
           set -euo pipefail
@@ -181,37 +181,15 @@ jobs:
           from pathlib import Path
           p = Path("worker/src/index.ts")
           s = p.read_text(encoding="utf-8")
-
-          bindings = '    bindings: [\n      { type: "d1", name: "DB", database_id: d1Id },'
-          if '{ type: "assets", name: "ASSETS" }' not in s:
-              if bindings not in s:
+          assets = '{ type: "assets", name: "ASSETS" }'
+          if assets not in s:
+              marker = '    bindings: [\n'
+              if marker not in s:
                   raise SystemExit("Worker bindings block not found")
-              s = s.replace(bindings, '    bindings: [\n      { type: "assets", name: "ASSETS" },\n      { type: "d1", name: "DB", database_id: d1Id },', 1)
-
-          marker = '''  if (!manifest || typeof manifest !== "object" || !manifest["/index.html"]) {
-          throw new Error("Panel frontend manifest is empty or invalid.");
-          }'''
-          check = '''  if (!manifest || typeof manifest !== "object" || !manifest["/index.html"]) {
-          throw new Error("Panel frontend manifest is empty or invalid.");
-          }
-          const panelIndex = await env.ASSETS.fetch(
-          new Request("https://assets.local/__pixelping_panel/index.html"),
-          );
-          const panelHtml = await panelIndex.text();
-          if (
-          !panelIndex.ok ||
-          !/Pixel\\s*&(?:amp;)?\\s*Ping/i.test(panelHtml) ||
-          /PIXEL\\s*&\\s*PING\\s*[—-]\\s*Deploy/i.test(panelHtml)
-          ) {
-          throw new Error("Panel asset verification failed: deployer HTML was returned instead of the real panel.");
-          }'''
-          if marker not in s:
-              raise SystemExit("Panel manifest validation marker not found")
-          s = s.replace(marker, check, 1)
-
+              s = s.replace(marker, marker + '      ' + assets + ',\n', 1)
           p.write_text(s, encoding="utf-8")
           PY
-
+          grep -F '{ type: "assets", name: "ASSETS" }' worker/src/index.ts
       - name: Add post-deploy panel HTML verification
         shell: bash
         run: |
