@@ -99,8 +99,35 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          python3 <<'PY'
+          from pathlib import Path
+          import os
+          p = Path(os.environ["PANEL_ROOT"]) / "frontend/vite.config.ts"
+          s = p.read_text()
+          if "base:" in s:
+              import re
+              s = re.sub(r"\\n\\s*base:\s*[^,\\n]+,?", "", s, count=1)
+          marker = "return {"
+          if marker not in s:
+              raise SystemExit(f"Unexpected Vite config: {p}")
+          s = s.replace(marker, 'return {\\n    base: "/",', 1)
+          p.write_text(s)
+          PY
+
           npm run build --prefix "${PANEL_ROOT}/frontend"
           test -s "${PANEL_ROOT}/frontend/dist/index.html"
+
+          python3 <<'PY'
+          from pathlib import Path
+          import os
+          html = (Path(os.environ["PANEL_ROOT"]) / "frontend/dist/index.html").read_text()
+          if "PIXEL &amp; PING" not in html and "Pixel &amp; Ping" not in html:
+              raise SystemExit("Panel dist index.html does not look like the real Pixel & Ping panel.")
+          if "pixel-and-ping-deployer1" in html:
+              raise SystemExit("Panel dist contains the deployer base path.")
+          print("Verified panel index.html is the real panel and uses root-relative assets.")
+          PY
 
       - name: Build real panel Worker bundle
         shell: bash
@@ -150,7 +177,7 @@ jobs:
           import hashlib
           import json
 
-          root = Path("frontend/public/panel-dist")
+          root = Path("frontend/public/__pixelping_panel")
           manifest = {}
 
           for f in sorted(root.rglob("*")):
@@ -169,7 +196,7 @@ jobs:
           )
           PY
 
-          test -s frontend/public/panel-dist/index.html
+          test -s frontend/public/__pixelping_panel/index.html
           test -s frontend/public/panel-manifest.json
           test -s worker/src/assets/panel-worker.bundle.txt
 
@@ -185,7 +212,7 @@ jobs:
           set -euo pipefail
           test -s frontend/dist/index.html
           test -s frontend/dist/panel-manifest.json
-          test -s frontend/dist/panel-dist/index.html
+          test -s frontend/dist/__pixelping_panel/index.html
           test -s worker/src/assets/panel-worker.bundle.txt
           echo "All build outputs are present."
 
