@@ -18,12 +18,16 @@ jobs:
   deploy-worker:
     name: Deploy PIXEL & PING Worker
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
 
       - name: Prepare real panel source
         shell: bash
@@ -31,63 +35,79 @@ jobs:
           set -euo pipefail
           test -s panel-source.zip
           rm -rf .panel-source
-          mkdir .panel-source
+          mkdir -p .panel-source
           unzip -q panel-source.zip -d .panel-source
-          PANEL_ROOT="$(find .panel-source -mindepth 1 -maxdepth 3 -type d -name frontend | head -n 1 | xargs -r dirname)"
+
+          PANEL_ROOT="$(find .panel-source -mindepth 1 -maxdepth 4 -type d -name frontend -print -quit | xargs -r dirname)"
           test -n "$PANEL_ROOT"
           test -d "$PANEL_ROOT/frontend"
           test -d "$PANEL_ROOT/worker"
           echo "PANEL_ROOT=$PANEL_ROOT" >> "$GITHUB_ENV"
 
       - name: Install panel dependencies
-        run: npm install --prefix "${{ env.PANEL_ROOT }}" --no-audit --no-fund
+        shell: bash
+        run: npm install --prefix "${PANEL_ROOT}" --no-audit --no-fund
 
       - name: Adapt panel for generated password
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
+
+          python3 <<'PY'
           from pathlib import Path
           import os
+
           root = Path(os.environ["PANEL_ROOT"])
 
+          # worker/src/lib/env.ts
           p = root / "worker/src/lib/env.ts"
           s = p.read_text()
           if "INITIAL_ADMIN_PASSWORD" not in s:
-              s = s.replace("  PUBLIC_BASE_URL: string;
-",
-                            "  PUBLIC_BASE_URL: string;
-  INITIAL_ADMIN_PASSWORD: string;
-")
+              old = "  PUBLIC_BASE_URL: string;"
+              new = "  PUBLIC_BASE_URL: string;\n  INITIAL_ADMIN_PASSWORD: string;"
+              if old not in s:
+                  raise SystemExit(f"Could not patch {p}: PUBLIC_BASE_URL not found")
+              s = s.replace(old, new, 1)
           p.write_text(s)
 
+          # worker/src/routes/auth.ts
           p = root / "worker/src/routes/auth.ts"
           s = p.read_text()
-          s = s.replace('if (password !== "admin") {',
-                        'if (password !== c.env.INITIAL_ADMIN_PASSWORD) {')
-          s = s.replace('const passwordHash = await bcrypt.hash("admin", 12);',
-                        'const passwordHash = await bcrypt.hash(c.env.INITIAL_ADMIN_PASSWORD, 12);')
+          if 'if (password !== "admin") {' in s:
+              s = s.replace(
+                  'if (password !== "admin") {',
+                  'if (password !== c.env.INITIAL_ADMIN_PASSWORD) {',
+                  1,
+              )
+          if 'await bcrypt.hash("admin", 12)' in s:
+              s = s.replace(
+                  'await bcrypt.hash("admin", 12)',
+                  'await bcrypt.hash(c.env.INITIAL_ADMIN_PASSWORD, 12)',
+                  1,
+              )
           p.write_text(s)
 
+          # frontend/src/pages/Login.tsx
           p = root / "frontend/src/pages/Login.tsx"
           s = p.read_text()
-          s = s.replace(
-              '<span className="text-slate-500">{t("auth.defaultPassword")}</span> <strong className="font-mono text-slate-100">admin</strong>',
-              '<span className="text-slate-500">Use the initial password provided by the deployer.</span>'
-          )
+          old = '<span className="text-slate-500">{t("auth.defaultPassword")}</span> <strong className="font-mono text-slate-100">admin</strong>'
+          new = '<span className="text-slate-500">Use the initial password provided by the deployer.</span>'
+          s = s.replace(old, new, 1)
           p.write_text(s)
           PY
 
       - name: Build real panel frontend
+        shell: bash
         run: |
           set -euo pipefail
-          npm run build --prefix "${{ env.PANEL_ROOT }}/frontend"
-          test -s "${{ env.PANEL_ROOT }}/frontend/dist/index.html"
+          npm run build --prefix "${PANEL_ROOT}/frontend"
+          test -s "${PANEL_ROOT}/frontend/dist/index.html"
 
       - name: Build real panel Worker bundle
         shell: bash
         run: |
           set -euo pipefail
+
           cat > "${PANEL_ROOT}/worker/wrangler.panel-build.jsonc" <<'JSON'
           {
             "$schema": "node_modules/wrangler/config-schema.json",
@@ -97,18 +117,29 @@ jobs:
             "compatibility_flags": ["nodejs_compat"]
           }
           JSON
+
           rm -rf .panel-generated
-          mkdir .panel-generated
+          mkdir -p .panel-generated
+
           cd "${PANEL_ROOT}/worker"
+
           set +e
-          npx wrangler@4.131.1 deploy --dry-run --outdir "${GITHUB_WORKSPACE}/.panel-generated" --config wrangler.panel-build.jsonc
+          npx wrangler@4.131.1 deploy \
+            --dry-run \
+            --outdir "${GITHUB_WORKSPACE}/.panel-generated" \
+            --config wrangler.panel-build.jsonc
           WRANGLER_STATUS=$?
           set -e
-          cd "$GITHUB_WORKSPACE"
-          test -s .panel-generated/worker.js
-          if [ "$WRANGLER_STATUS" -ne 0 ]; then
-            echo "Wrangler dry-run returned $WRANGLER_STATUS after producing worker.js; continuing with the generated bundle."
+
+          # Wrangler can return non-zero after producing the dry-run bundle.
+          # The real success criterion here is that worker.js exists and is non-empty.
+          if [ ! -s "${GITHUB_WORKSPACE}/.panel-generated/worker.js" ]; then
+            echo "Wrangler did not produce .panel-generated/worker.js"
+            exit "$WRANGLER_STATUS"
           fi
+
+          echo "Panel Worker bundle created successfully."
+          exit 0
 
       - name: Install deployer frontend
         working-directory: frontend
@@ -118,29 +149,40 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           rm -rf frontend/public/panel-dist
           mkdir -p frontend/public/panel-dist
+
           cp .panel-generated/worker.js worker/src/assets/panel-worker.bundle.txt
           cp -R "${PANEL_ROOT}/frontend/dist/." frontend/public/panel-dist/
 
-          python3 - <<'PY'
+          python3 <<'PY'
           from pathlib import Path
-          import hashlib, json
+          import hashlib
+          import json
+
           root = Path("frontend/public/panel-dist")
           manifest = {}
+
           for f in sorted(root.rglob("*")):
               if f.is_file():
                   data = f.read_bytes()
                   manifest["/" + f.relative_to(root).as_posix()] = {
                       "hash": hashlib.md5(data).hexdigest(),
-                      "size": len(data)
+                      "size": len(data),
                   }
+
           if "/index.html" not in manifest:
               raise SystemExit("Panel build missing index.html")
+
           Path("frontend/public/panel-manifest.json").write_text(
               json.dumps(manifest, separators=(",", ":"))
           )
           PY
+
+          test -s frontend/public/panel-dist/index.html
+          test -s frontend/public/panel-manifest.json
+          test -s worker/src/assets/panel-worker.bundle.txt
 
       - name: Build deployer frontend
         working-directory: frontend
@@ -148,12 +190,15 @@ jobs:
           VITE_API_BASE_URL: https://pixel-and-ping-deployer1.fbtby.workers.dev
         run: npm run build
 
-      - name: Verify
+      - name: Verify build outputs
+        shell: bash
         run: |
+          set -euo pipefail
           test -s frontend/dist/index.html
           test -s frontend/dist/panel-manifest.json
           test -s frontend/dist/panel-dist/index.html
           test -s worker/src/assets/panel-worker.bundle.txt
+          echo "All build outputs are present."
 
       - name: Install Wrangler
         run: npm install --global wrangler@4.131.1
@@ -165,9 +210,11 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: wrangler deploy
 
-      - uses: actions/configure-pages@v5
+      - name: Setup GitHub Pages
+        uses: actions/configure-pages@v5
 
-      - uses: actions/upload-pages-artifact@v4
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
         with:
           path: frontend/dist
 
@@ -175,12 +222,16 @@ jobs:
     name: Publish GitHub Pages
     runs-on: ubuntu-latest
     needs: deploy-worker
+
     permissions:
       pages: write
       id-token: write
+
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+
     steps:
-      - uses: actions/deploy-pages@v4
+      - name: Deploy Pages
         id: deployment
+        uses: actions/deploy-pages@v4
