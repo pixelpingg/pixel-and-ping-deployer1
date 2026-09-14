@@ -54,11 +54,8 @@ jobs:
           p = root / "worker/src/lib/env.ts"
           s = p.read_text()
           if "INITIAL_ADMIN_PASSWORD" not in s:
-              s = s.replace("  PUBLIC_BASE_URL: string;
-",
-                            "  PUBLIC_BASE_URL: string;
-  INITIAL_ADMIN_PASSWORD: string;
-")
+              s = s.replace("  PUBLIC_BASE_URL: string;\n",
+                            "  PUBLIC_BASE_URL: string;\n  INITIAL_ADMIN_PASSWORD: string;\n")
           p.write_text(s)
 
           p = root / "worker/src/routes/auth.ts"
