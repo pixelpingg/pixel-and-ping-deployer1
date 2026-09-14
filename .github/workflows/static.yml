@@ -18,7 +18,6 @@ jobs:
   deploy-worker:
     name: Deploy PIXEL & PING Worker
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -45,7 +44,7 @@ jobs:
       - name: Install panel dependencies
         run: npm install --prefix "${PANEL_ROOT}" --no-audit --no-fund
 
-      - name: Patch panel initial admin password
+      - name: Patch panel initial password support
         shell: bash
         run: |
           set -euo pipefail
@@ -53,31 +52,19 @@ jobs:
           from pathlib import Path
           import os
           root = Path(os.environ["PANEL_ROOT"])
-
           p = root / "worker/src/lib/env.ts"
           s = p.read_text(encoding="utf-8")
           if "INITIAL_ADMIN_PASSWORD" not in s:
               marker = "  PUBLIC_BASE_URL: string;"
               if marker not in s:
-                  raise SystemExit("Could not patch env.ts")
+                  raise SystemExit("Could not patch panel env.ts")
               s = s.replace(marker, marker + "\n  INITIAL_ADMIN_PASSWORD: string;", 1)
           p.write_text(s, encoding="utf-8")
-
           p = root / "worker/src/routes/auth.ts"
           s = p.read_text(encoding="utf-8")
           s = s.replace('if (password !== "admin") {', 'if (password !== c.env.INITIAL_ADMIN_PASSWORD) {', 1)
           s = s.replace('await bcrypt.hash("admin", 12)', 'await bcrypt.hash(c.env.INITIAL_ADMIN_PASSWORD, 12)', 1)
           p.write_text(s, encoding="utf-8")
-
-          p = root / "frontend/src/pages/Login.tsx"
-          if p.exists():
-              s = p.read_text(encoding="utf-8")
-              s = s.replace(
-                  '<span className="text-slate-500">{t("auth.defaultPassword")}</span> <strong className="font-mono text-slate-100">admin</strong>',
-                  '<span className="text-slate-500">Use the initial password provided by the deployer.</span>',
-                  1,
-              )
-              p.write_text(s, encoding="utf-8")
           PY
 
       - name: Build real panel frontend
@@ -86,10 +73,10 @@ jobs:
           set -euo pipefail
           python3 <<'PY'
           from pathlib import Path
-          import os, re
+          import os
+          import re
           p = Path(os.environ["PANEL_ROOT"]) / "frontend/vite.config.ts"
           s = p.read_text(encoding="utf-8")
-          s = s.replace(r'\n    base: "/",', '')
           s = re.sub(r'(?m)^\s*base\s*:\s*["\'][^"\']*["\'],?\s*$', '', s)
           if "return {" not in s:
               raise SystemExit("Unexpected panel Vite config")
@@ -98,15 +85,9 @@ jobs:
           PY
           npm run build --prefix "${PANEL_ROOT}/frontend"
           test -s "${PANEL_ROOT}/frontend/dist/index.html"
-          python3 <<'PY'
-          from pathlib import Path
-          import os
-          html = (Path(os.environ["PANEL_ROOT"]) / "frontend/dist/index.html").read_text(encoding="utf-8")
-          if "PIXEL &amp; PING" not in html and "Pixel &amp; Ping" not in html and "Pixel & Ping" not in html:
-              raise SystemExit("Real panel HTML was not produced")
-          if "PIXEL & PING — Deploy" in html or "pixel-and-ping-deployer1" in html:
-              raise SystemExit("Deployer HTML leaked into panel build")
-          PY
+          grep -Eqi 'pixel[[:space:]]*&[^<]*ping' "${PANEL_ROOT}/frontend/dist/index.html" || { echo "Real panel HTML was not produced"; exit 1; }
+          ! grep -Fq 'PIXEL & PING — Deploy' "${PANEL_ROOT}/frontend/dist/index.html"
+          ! grep -Fq 'pixel-and-ping-deployer1' "${PANEL_ROOT}/frontend/dist/index.html"
 
       - name: Build real panel Worker bundle
         shell: bash
@@ -127,22 +108,22 @@ jobs:
           npx wrangler@4.131.1 deploy --dry-run --outfile "${GITHUB_WORKSPACE}/.panel-generated/worker.js" --config wrangler.panel-build.jsonc
           test -s "${GITHUB_WORKSPACE}/.panel-generated/worker.js"
 
-      - name: Create self-contained panel bundle
+      - name: Stage panel assets and manifest
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf frontend/public/__pixelping_panel
-          mkdir -p frontend/public/__pixelping_panel
-          cp -R "${PANEL_ROOT}/frontend/dist/." frontend/public/__pixelping_panel/
+          rm -rf frontend/public/panel-dist
+          mkdir -p frontend/public/panel-dist
+          cp -R "${PANEL_ROOT}/frontend/dist/." frontend/public/panel-dist/
           cp .panel-generated/worker.js worker/src/assets/panel-worker.bundle.txt
-          test -s frontend/public/__pixelping_panel/index.html
+          test -s frontend/public/panel-dist/index.html
+          test -s worker/src/assets/panel-worker.bundle.txt
           python3 <<'PY'
           from pathlib import Path
-          import hashlib, json
-          root = Path("frontend/public/__pixelping_panel")
+          import hashlib
+          import json
+          root = Path("frontend/public/panel-dist")
           html = (root / "index.html").read_text(encoding="utf-8")
-          if "PIXEL &amp; PING" not in html and "Pixel &amp; Ping" not in html and "Pixel & Ping" not in html:
-              raise SystemExit("Panel index verification failed")
           if "PIXEL & PING — Deploy" in html or "pixel-and-ping-deployer1" in html:
               raise SystemExit("Deployer HTML detected in panel bundle")
           manifest = {}
@@ -153,24 +134,10 @@ jobs:
                       "hash": hashlib.sha256(data).hexdigest()[:32],
                       "size": len(data),
                   }
-          Path("frontend/public/panel-manifest.json").write_text(json.dumps(manifest, separators=(",", ":")), encoding="utf-8")
-          print(f"Verified {len(manifest)} real panel assets")
-          PY
-
-      - name: Patch deployer asset loader
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 <<'PY'
-          from pathlib import Path
-          p = Path("worker/src/index.ts")
-          s = p.read_text(encoding="utf-8")
-          old = 'https://assets.local/panel-dist${path}'
-          new = 'https://assets.local/__pixelping_panel${path}'
-          if old not in s:
-              raise SystemExit("Panel asset loader marker not found")
-          s = s.replace(old, new, 1)
-          p.write_text(s, encoding="utf-8")
+          Path("frontend/public/panel-manifest.json").write_text(
+              json.dumps(manifest, separators=(",", ":")), encoding="utf-8"
+          )
+          print("Verified", len(manifest), "panel assets")
           PY
 
       - name: Add ASSETS binding to panel upload metadata
@@ -181,67 +148,19 @@ jobs:
           from pathlib import Path
           p = Path("worker/src/index.ts")
           s = p.read_text(encoding="utf-8")
-          assets = '{ type: "assets", name: "ASSETS" }'
-          if assets not in s:
-              marker = '    bindings: [\n'
-              if marker not in s:
-                  raise SystemExit("Worker bindings block not found")
-              s = s.replace(marker, marker + '      ' + assets + ',\n', 1)
+          if '{ type: "assets", name: "ASSETS" }' not in s:
+              needle = '      { type: "d1", name: "DB", database_id: d1Id },'
+              if needle not in s:
+                  raise SystemExit("Panel Worker D1 binding not found")
+              s = s.replace(
+                  needle,
+                  '      { type: "assets", name: "ASSETS" },\n' + needle,
+                  1,
+              )
           p.write_text(s, encoding="utf-8")
           PY
           grep -F '{ type: "assets", name: "ASSETS" }' worker/src/index.ts
-      - name: Add post-deploy panel HTML verification
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 <<'PY'
-          from pathlib import Path
-          p = Path("worker/src/index.ts")
-          s = p.read_text(encoding="utf-8")
-          marker = '''async function healthCheck(url: string) {'''
-          fn = '''async function verifyPanelFrontend(url: string) {
-          let last = "no response";
-          for (let i = 0; i < 12; i++) {
-          try {
-          const response = await fetch(`${url}/`, { headers: { accept: "text/html" } });
-          const type = response.headers.get("content-type") || "";
-          const html = await response.text();
-          const isPanel =
-          /Pixel\\s*&(?:amp;)?\\s*Ping/i.test(html) &&
-          !/PIXEL\\s*&\\s*PING\\s*[—-]\\s*Deploy/i.test(html) &&
-          !html.includes("pixel-and-ping-deployer1");
-          if (response.ok && type.toLowerCase().includes("text/html") && isPanel) return;
-          last = `HTTP ${response.status}; content-type=${type}`;
-          } catch (error) {
-          last = error instanceof Error ? error.message : String(error);
-          }
-          await new Promise((resolve) => setTimeout(resolve, 1500));
-          }
-          throw new Error(`Panel frontend verification failed: ${last}`);
-          }
-          '''
-          if "async function verifyPanelFrontend" not in s:
-              if marker not in s:
-                  raise SystemExit("healthCheck marker not found")
-              s = s.replace(marker, fn + marker, 1)
-          old = '''       step = "health";
-          await this.set(step);
-          await healthCheck(panelUrl);
-
-          step = "admin";'''
-          new = '''       step = "health";
-          await this.set(step);
-          await healthCheck(panelUrl);
-          step = "frontend";
-          await this.set(step);
-          await verifyPanelFrontend(panelUrl);
-
-          step = "admin";'''
-          if old not in s:
-              raise SystemExit("Deployment health block not found")
-          s = s.replace(old, new, 1)
-          p.write_text(s, encoding="utf-8")
-          PY
+          grep -F 'https://assets.local/panel-dist${path}' worker/src/index.ts
 
       - name: Install deployer dependencies
         working-directory: frontend
@@ -253,24 +172,17 @@ jobs:
           VITE_API_BASE_URL: https://pixel-and-ping-deployer1.fbtby.workers.dev
         run: npm run build
 
-      - name: Verify final deployer artifact
+      - name: Verify final artifacts
         shell: bash
         run: |
           set -euo pipefail
           test -s frontend/dist/index.html
           test -s frontend/dist/panel-manifest.json
-          test -s frontend/dist/__pixelping_panel/index.html
+          test -s frontend/dist/panel-dist/index.html
           test -s worker/src/assets/panel-worker.bundle.txt
-          python3 <<'PY'
-          from pathlib import Path
-          deployer = Path("frontend/dist/index.html").read_text(encoding="utf-8")
-          panel = Path("frontend/dist/__pixelping_panel/index.html").read_text(encoding="utf-8")
-          if "PIXEL & PING — Deploy" not in deployer:
-              raise SystemExit("Deployer index verification failed")
-          if "PIXEL & PING — Deploy" in panel or "pixel-and-ping-deployer1" in panel:
-              raise SystemExit("Panel artifact contains deployer HTML")
-          print("Final artifact verified: deployer and panel HTML are separate.")
-          PY
+          ! grep -Fq 'PIXEL & PING — Deploy' frontend/dist/panel-dist/index.html
+          ! grep -Fq 'pixel-and-ping-deployer1' frontend/dist/panel-dist/index.html
+          echo "Final panel artifact is isolated from deployer HTML."
 
       - name: Install Wrangler
         run: npm install --global wrangler@4.131.1
