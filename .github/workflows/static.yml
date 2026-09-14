@@ -52,18 +52,34 @@ jobs:
           from pathlib import Path
           import os
           root = Path(os.environ["PANEL_ROOT"])
+
           p = root / "worker/src/lib/env.ts"
           s = p.read_text(encoding="utf-8")
           if "INITIAL_ADMIN_PASSWORD" not in s:
               marker = "  PUBLIC_BASE_URL: string;"
               if marker not in s:
                   raise SystemExit("Could not patch panel env.ts")
-              s = s.replace(marker, marker + "\n  INITIAL_ADMIN_PASSWORD: string;", 1)
+              s = s.replace(
+                  marker,
+                  marker + "\n  INITIAL_ADMIN_PASSWORD: string;",
+                  1,
+              )
           p.write_text(s, encoding="utf-8")
+
           p = root / "worker/src/routes/auth.ts"
           s = p.read_text(encoding="utf-8")
-          s = s.replace('if (password !== "admin") {', 'if (password !== c.env.INITIAL_ADMIN_PASSWORD) {', 1)
-          s = s.replace('await bcrypt.hash("admin", 12)', 'await bcrypt.hash(c.env.INITIAL_ADMIN_PASSWORD, 12)', 1)
+          if 'password !== "admin"' in s:
+              s = s.replace(
+                  'password !== "admin"',
+                  "password !== c.env.INITIAL_ADMIN_PASSWORD",
+                  1,
+              )
+          if 'bcrypt.hash("admin", 12)' in s:
+              s = s.replace(
+                  'bcrypt.hash("admin", 12)',
+                  "bcrypt.hash(c.env.INITIAL_ADMIN_PASSWORD, 12)",
+                  1,
+              )
           p.write_text(s, encoding="utf-8")
           PY
 
@@ -75,17 +91,27 @@ jobs:
           from pathlib import Path
           import os
           import re
+
           p = Path(os.environ["PANEL_ROOT"]) / "frontend/vite.config.ts"
           s = p.read_text(encoding="utf-8")
-          s = re.sub(r'(?m)^\s*base\s*:\s*["\'][^"\']*["\'],?\s*$', '', s)
+          s = re.sub(
+              r'(?m)^\s*base\s*:\s*["\'][^"\']*["\'],?\s*$',
+              '',
+              s,
+          )
           if "return {" not in s:
               raise SystemExit("Unexpected panel Vite config")
           s = s.replace("return {", 'return {\n    base: "/",', 1)
           p.write_text(s, encoding="utf-8")
           PY
+
           npm run build --prefix "${PANEL_ROOT}/frontend"
+
           test -s "${PANEL_ROOT}/frontend/dist/index.html"
-          grep -Eqi 'pixel[[:space:]]*&[^<]*ping' "${PANEL_ROOT}/frontend/dist/index.html" || { echo "Real panel HTML was not produced"; exit 1; }
+          grep -Eqi 'pixel[[:space:]]*&[^<]*ping' "${PANEL_ROOT}/frontend/dist/index.html" || {
+            echo "Real panel HTML was not produced"
+            exit 1
+          }
           ! grep -Fq 'PIXEL & PING — Deploy' "${PANEL_ROOT}/frontend/dist/index.html"
           ! grep -Fq 'pixel-and-ping-deployer1' "${PANEL_ROOT}/frontend/dist/index.html"
 
@@ -102,65 +128,151 @@ jobs:
             "compatibility_flags": ["nodejs_compat"]
           }
           JSON
+
           rm -rf .panel-generated
           mkdir -p .panel-generated
+
           cd "${PANEL_ROOT}/worker"
-          npx wrangler@4.131.1 deploy --dry-run --outfile "${GITHUB_WORKSPACE}/.panel-generated/worker.js" --config wrangler.panel-build.jsonc
+          npx wrangler@4.131.1 deploy \
+            --dry-run \
+            --outfile "${GITHUB_WORKSPACE}/.panel-generated/worker.js" \
+            --config wrangler.panel-build.jsonc
+
           test -s "${GITHUB_WORKSPACE}/.panel-generated/worker.js"
 
       - name: Stage panel assets and manifest
         shell: bash
         run: |
           set -euo pipefail
+
           rm -rf frontend/public/panel-dist
           mkdir -p frontend/public/panel-dist
+
           cp -R "${PANEL_ROOT}/frontend/dist/." frontend/public/panel-dist/
           cp .panel-generated/worker.js worker/src/assets/panel-worker.bundle.txt
+
           test -s frontend/public/panel-dist/index.html
           test -s worker/src/assets/panel-worker.bundle.txt
+
           python3 <<'PY'
           from pathlib import Path
           import hashlib
           import json
+
           root = Path("frontend/public/panel-dist")
           html = (root / "index.html").read_text(encoding="utf-8")
+
           if "PIXEL & PING — Deploy" in html or "pixel-and-ping-deployer1" in html:
               raise SystemExit("Deployer HTML detected in panel bundle")
+
           manifest = {}
+
           for f in sorted(root.rglob("*")):
-              if f.is_file():
-                  data = f.read_bytes()
-                  manifest["/" + f.relative_to(root).as_posix()] = {
-                      "hash": hashlib.sha256(data).hexdigest()[:32],
-                      "size": len(data),
-                  }
+              if not f.is_file():
+                  continue
+
+              data = f.read_bytes()
+              relative = f.relative_to(root).as_posix()
+              extension = f.suffix.lstrip(".").lower()
+
+              # Cloudflare's current direct-upload examples derive the
+              # 32-hex manifest hash from SHA-256 of base64(file)+extension.
+              digest_input = data.hex() if False else None
+              import base64
+              encoded = base64.b64encode(data)
+              digest = hashlib.sha256(
+                  encoded + extension.encode("utf-8")
+              ).hexdigest()[:32]
+
+              manifest["/" + relative] = {
+                  "hash": digest,
+                  "size": len(data),
+              }
+
           Path("frontend/public/panel-manifest.json").write_text(
-              json.dumps(manifest, separators=(",", ":")), encoding="utf-8"
+              json.dumps(manifest, separators=(",", ":")),
+              encoding="utf-8",
           )
+
           print("Verified", len(manifest), "panel assets")
           PY
 
-      - name: Add ASSETS binding to panel upload metadata
+          test -s frontend/public/panel-manifest.json
+
+      - name: Harden deployer asset loader and panel upload metadata
         shell: bash
         run: |
           set -euo pipefail
+
           python3 <<'PY'
           from pathlib import Path
+
           p = Path("worker/src/index.ts")
           s = p.read_text(encoding="utf-8")
-          if '{ type: "assets", name: "ASSETS" }' not in s:
-              needle = '      { type: "d1", name: "DB", database_id: d1Id },'
-              if needle not in s:
+
+          # The deployer must read the isolated panel staging directory.
+          s = s.replace(
+              "https://assets.local/panel-dist${path}",
+              "https://assets.local/panel-dist${path}",
+          )
+
+          # The panel Worker must receive an explicit ASSETS binding because
+          # the panel metadata uses an assets collection.
+          assets_binding = '{ type: "assets", name: "ASSETS" },'
+          d1_binding = '      { type: "d1", name: "DB", database_id: d1Id },'
+
+          if assets_binding not in s:
+              if d1_binding not in s:
                   raise SystemExit("Panel Worker D1 binding not found")
               s = s.replace(
-                  needle,
-                  '      { type: "assets", name: "ASSETS" },\n' + needle,
+                  d1_binding,
+                  "      " + assets_binding + "\n" + d1_binding,
                   1,
               )
+
+          # Add a runtime check that the staged index is actually the panel.
+          marker = """  return manifest;
+}
+
+async function uploadPanelAssets"""
+          replacement = """  const indexResponse = await env.ASSETS.fetch(
+    new Request("https://assets.local/panel-dist/index.html"),
+  );
+
+  if (!indexResponse.ok) {
+    throw new Error(
+      `Panel index asset could not be loaded. HTTP ${indexResponse.status}`,
+    );
+  }
+
+  const indexHtml = await indexResponse.text();
+
+  if (
+    indexHtml.includes("PIXEL & PING — Deploy") ||
+    indexHtml.includes("pixel-and-ping-deployer1") ||
+    !/pixel\\s*&\\s*ping/i.test(indexHtml)
+  ) {
+    throw new Error(
+      "Panel asset verification failed: staged index.html is not the real panel.",
+    );
+  }
+
+  return manifest;
+}
+
+async function uploadPanelAssets"""
+
+          if "Panel asset verification failed: staged index.html" not in s:
+              if marker not in s:
+                  raise SystemExit("Panel manifest return marker not found")
+              s = s.replace(marker, replacement, 1)
+
           p.write_text(s, encoding="utf-8")
           PY
-          grep -F '{ type: "assets", name: "ASSETS" }' worker/src/index.ts
+
+          grep -F '{ type: "assets", name: "ASSETS" },' worker/src/index.ts
           grep -F 'https://assets.local/panel-dist${path}' worker/src/index.ts
+          grep -F 'Panel asset verification failed: staged index.html' worker/src/index.ts
 
       - name: Install deployer dependencies
         working-directory: frontend
@@ -176,12 +288,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           test -s frontend/dist/index.html
           test -s frontend/dist/panel-manifest.json
           test -s frontend/dist/panel-dist/index.html
           test -s worker/src/assets/panel-worker.bundle.txt
+
           ! grep -Fq 'PIXEL & PING — Deploy' frontend/dist/panel-dist/index.html
           ! grep -Fq 'pixel-and-ping-deployer1' frontend/dist/panel-dist/index.html
+
           echo "Final panel artifact is isolated from deployer HTML."
 
       - name: Install Wrangler
