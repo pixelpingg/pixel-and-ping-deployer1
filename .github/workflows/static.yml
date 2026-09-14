@@ -198,7 +198,7 @@ jobs:
               if f.is_file():
                   data = f.read_bytes()
                   manifest["/" + f.relative_to(root).as_posix()] = {
-                      "hash": hashlib.md5(data).hexdigest(),
+                      "hash": hashlib.sha256(data).hexdigest()[:32],
                       "size": len(data),
                   }
 
@@ -228,6 +228,20 @@ jobs:
           test -s frontend/public/panel-manifest.json
           test -s worker/src/assets/panel-worker.bundle.txt
 
+          python3 <<'PY'
+          from pathlib import Path
+          import json
+          import re
+
+          manifest = json.loads(Path("frontend/public/panel-manifest.json").read_text(encoding="utf-8"))
+          if not manifest:
+              raise SystemExit("Panel asset manifest is empty.")
+          for path, entry in manifest.items():
+              if not re.fullmatch(r"[0-9a-f]{32}", str(entry.get("hash", "")), re.I):
+                  raise SystemExit(f"Invalid 32-hex asset hash for {path}")
+          print(f"Verified {len(manifest)} panel asset manifest entries.")
+          PY
+
       - name: Point deployer asset loader at panel staging directory
         shell: bash
         run: |
@@ -250,6 +264,40 @@ jobs:
           PY
 
           grep -F '__pixelping_panel${path}' worker/src/index.ts
+
+      - name: Harden panel asset deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          p = Path("worker/src/index.ts")
+          s = p.read_text(encoding="utf-8")
+
+          # The user panel Worker uses the Workers Static Assets collection.
+          # Declare the binding explicitly in the multipart metadata.
+          old_bindings = '    bindings: [\n      { type: "d1", name: "DB", database_id: d1Id },'
+          new_bindings = '    bindings: [\n      { type: "assets", name: "ASSETS" },\n      { type: "d1", name: "DB", database_id: d1Id },'
+          if old_bindings in s and '{ type: "assets", name: "ASSETS" }' not in s:
+              s = s.replace(old_bindings, new_bindings, 1)
+          elif '{ type: "assets", name: "ASSETS" }' not in s:
+              raise SystemExit("Could not locate Worker bindings block.")
+
+          # Never allow SPA fallback from the deployer to silently turn a
+          # missing staged panel asset into the deployer homepage.
+          marker = '  const manifest = (await response.json().catch(() => null)) as PanelManifest | null;\n  if (!manifest || typeof manifest !== "object" || !manifest["/index.html"]) {\n    throw new Error("Panel frontend manifest is empty or invalid.");\n  }'
+          injected = '  const manifest = (await response.json().catch(() => null)) as PanelManifest | null;\n  if (!manifest || typeof manifest !== "object" || !manifest["/index.html"]) {\n    throw new Error("Panel frontend manifest is empty or invalid.");\n  }\n\n  const indexResponse = await env.ASSETS.fetch(\n    new Request("https://assets.local/__pixelping_panel/index.html"),\n  );\n  const indexHtml = await indexResponse.text();\n  if (\n    !indexResponse.ok ||\n    !/Pixel\\s*&(?:amp;)?\\s*Ping/i.test(indexHtml) ||\n    /PIXEL\\s*&\\s*PING\\s*[—-]\\s*Deploy/i.test(indexHtml)\n  ) {\n    throw new Error(\n      "Staged panel index.html verification failed: deployer HTML or invalid panel HTML was returned.",\n    );\n  }'
+          if marker not in s:
+              raise SystemExit("Could not locate panel manifest validation block.")
+          s = s.replace(marker, injected, 1)
+
+          p.write_text(s, encoding="utf-8")
+          PY
+
+          grep -F '{ type: "assets", name: "ASSETS" }' worker/src/index.ts
+          grep -F '__pixelping_panel/index.html' worker/src/index.ts
 
       - name: Build deployer frontend
         working-directory: frontend
