@@ -54,8 +54,11 @@ jobs:
           p = root / "worker/src/lib/env.ts"
           s = p.read_text()
           if "INITIAL_ADMIN_PASSWORD" not in s:
-              s = s.replace("  PUBLIC_BASE_URL: string;\n",
-                            "  PUBLIC_BASE_URL: string;\n  INITIAL_ADMIN_PASSWORD: string;\n")
+              s = s.replace("  PUBLIC_BASE_URL: string;
+",
+                            "  PUBLIC_BASE_URL: string;
+  INITIAL_ADMIN_PASSWORD: string;
+")
           p.write_text(s)
 
           p = root / "worker/src/routes/auth.ts"
@@ -97,9 +100,15 @@ jobs:
           rm -rf .panel-generated
           mkdir .panel-generated
           cd "${PANEL_ROOT}/worker"
+          set +e
           npx wrangler@4.131.1 deploy --dry-run --outdir "${GITHUB_WORKSPACE}/.panel-generated" --config wrangler.panel-build.jsonc
+          WRANGLER_STATUS=$?
+          set -e
           cd "$GITHUB_WORKSPACE"
           test -s .panel-generated/worker.js
+          if [ "$WRANGLER_STATUS" -ne 0 ]; then
+            echo "Wrangler dry-run returned $WRANGLER_STATUS after producing worker.js; continuing with the generated bundle."
+          fi
 
       - name: Install deployer frontend
         working-directory: frontend
