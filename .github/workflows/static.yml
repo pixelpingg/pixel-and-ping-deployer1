@@ -58,20 +58,18 @@ jobs:
 
           root = Path(os.environ["PANEL_ROOT"])
 
-          # worker/src/lib/env.ts
           p = root / "worker/src/lib/env.ts"
-          s = p.read_text()
+          s = p.read_text(encoding="utf-8")
           if "INITIAL_ADMIN_PASSWORD" not in s:
               old = "  PUBLIC_BASE_URL: string;"
               new = "  PUBLIC_BASE_URL: string;\n  INITIAL_ADMIN_PASSWORD: string;"
               if old not in s:
                   raise SystemExit(f"Could not patch {p}: PUBLIC_BASE_URL not found")
               s = s.replace(old, new, 1)
-          p.write_text(s)
+          p.write_text(s, encoding="utf-8")
 
-          # worker/src/routes/auth.ts
           p = root / "worker/src/routes/auth.ts"
-          s = p.read_text()
+          s = p.read_text(encoding="utf-8")
           if 'if (password !== "admin") {' in s:
               s = s.replace(
                   'if (password !== "admin") {',
@@ -84,15 +82,15 @@ jobs:
                   'await bcrypt.hash(c.env.INITIAL_ADMIN_PASSWORD, 12)',
                   1,
               )
-          p.write_text(s)
+          p.write_text(s, encoding="utf-8")
 
-          # frontend/src/pages/Login.tsx
           p = root / "frontend/src/pages/Login.tsx"
-          s = p.read_text()
-          old = '<span className="text-slate-500">{t("auth.defaultPassword")}</span> <strong className="font-mono text-slate-100">admin</strong>'
-          new = '<span className="text-slate-500">Use the initial password provided by the deployer.</span>'
-          s = s.replace(old, new, 1)
-          p.write_text(s)
+          if p.exists():
+              s = p.read_text(encoding="utf-8")
+              old = '<span className="text-slate-500">{t("auth.defaultPassword")}</span> <strong className="font-mono text-slate-100">admin</strong>'
+              new = '<span className="text-slate-500">Use the initial password provided by the deployer.</span>'
+              s = s.replace(old, new, 1)
+              p.write_text(s, encoding="utf-8")
           PY
 
       - name: Build real panel frontend
@@ -103,17 +101,26 @@ jobs:
           python3 <<'PY'
           from pathlib import Path
           import os
+          import re
+
           p = Path(os.environ["PANEL_ROOT"]) / "frontend/vite.config.ts"
-          s = p.read_text()
-          if "base:" in s:
-              import re
-              s = re.sub(r"\\n\\s*base:\s*[^,\\n]+,?", "", s, count=1)
+          s = p.read_text(encoding="utf-8")
+
+          # Remove the malformed literal backslash-n base line from the old workflow,
+          # and remove any normal base property if one already exists.
+          s = s.replace(r'\n    base: "/",', '')
+          s = re.sub(r'(?m)^\s*base\s*:\s*["\'][^"\']*["\']\s*,?\s*$', '', s)
+
           marker = "return {"
           if marker not in s:
               raise SystemExit(f"Unexpected Vite config: {p}")
-          s = s.replace(marker, 'return {\\n    base: "/",', 1)
-          p.write_text(s)
+
+          # This is a real newline in the generated TypeScript file.
+          s = s.replace(marker, 'return {\n    base: "/",', 1)
+          p.write_text(s, encoding="utf-8")
           PY
+
+          grep -n -A4 -B2 'return {' "${PANEL_ROOT}/frontend/vite.config.ts"
 
           npm run build --prefix "${PANEL_ROOT}/frontend"
           test -s "${PANEL_ROOT}/frontend/dist/index.html"
@@ -121,12 +128,16 @@ jobs:
           python3 <<'PY'
           from pathlib import Path
           import os
-          html = (Path(os.environ["PANEL_ROOT"]) / "frontend/dist/index.html").read_text()
-          if "PIXEL &amp; PING" not in html and "Pixel &amp; Ping" not in html:
+
+          html = (Path(os.environ["PANEL_ROOT"]) / "frontend/dist/index.html").read_text(encoding="utf-8")
+
+          if "PIXEL &amp; PING" not in html and "Pixel &amp; Ping" not in html and "Pixel & Ping" not in html:
               raise SystemExit("Panel dist index.html does not look like the real Pixel & Ping panel.")
+
           if "pixel-and-ping-deployer1" in html:
               raise SystemExit("Panel dist contains the deployer base path.")
-          print("Verified panel index.html is the real panel and uses root-relative assets.")
+
+          print("Verified panel index.html is the real panel.")
           PY
 
       - name: Build real panel Worker bundle
@@ -167,10 +178,13 @@ jobs:
           set -euo pipefail
 
           rm -rf frontend/public/panel-dist
-          mkdir -p frontend/public/panel-dist
+          rm -rf frontend/public/__pixelping_panel
+          mkdir -p frontend/public/__pixelping_panel
 
           cp .panel-generated/worker.js worker/src/assets/panel-worker.bundle.txt
-          cp -R "${PANEL_ROOT}/frontend/dist/." frontend/public/panel-dist/
+          cp -R "${PANEL_ROOT}/frontend/dist/." frontend/public/__pixelping_panel/
+
+          test -s frontend/public/__pixelping_panel/index.html
 
           python3 <<'PY'
           from pathlib import Path
@@ -192,13 +206,50 @@ jobs:
               raise SystemExit("Panel build missing index.html")
 
           Path("frontend/public/panel-manifest.json").write_text(
-              json.dumps(manifest, separators=(",", ":"))
+              json.dumps(manifest, separators=(",", ":")),
+              encoding="utf-8",
           )
           PY
 
-          test -s frontend/public/__pixelping_panel/index.html
+          python3 <<'PY'
+          from pathlib import Path
+
+          html = Path("frontend/public/__pixelping_panel/index.html").read_text(encoding="utf-8")
+
+          if "PIXEL &amp; PING" not in html and "Pixel &amp; Ping" not in html and "Pixel & Ping" not in html:
+              raise SystemExit("Staged panel index.html is not the real panel.")
+
+          if "pixel-and-ping-deployer1" in html:
+              raise SystemExit("Staged panel index.html contains deployer content.")
+
+          print("Panel assets staged successfully.")
+          PY
+
           test -s frontend/public/panel-manifest.json
           test -s worker/src/assets/panel-worker.bundle.txt
+
+      - name: Point deployer asset loader at panel staging directory
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          p = Path("worker/src/index.ts")
+          s = p.read_text(encoding="utf-8")
+
+          old = "https://assets.local/panel-dist${path}"
+          new = "https://assets.local/__pixelping_panel${path}"
+
+          if old not in s:
+              raise SystemExit("Expected panel asset loader URL was not found.")
+
+          s = s.replace(old, new, 1)
+          p.write_text(s, encoding="utf-8")
+          PY
+
+          grep -F '__pixelping_panel${path}' worker/src/index.ts
 
       - name: Build deployer frontend
         working-directory: frontend
