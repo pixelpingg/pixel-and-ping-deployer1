@@ -134,10 +134,6 @@ async function panelSource(env: Env): Promise<string> {
     );
   }
 
-  if (!source.includes("cloneEntry_default") && !source.includes("export")) {
-    throw new Error("Panel Worker bundle does not look like a valid Worker.");
-  }
-
   return source;
 }
 
@@ -460,6 +456,76 @@ function panelUrlFor(name: string, subdomain: string) {
   return `https://${name}.${subdomain}.workers.dev`;
 }
 
+
+type PanelManifestEntry = { hash: string; size: number };
+type PanelManifest = Record<string, PanelManifestEntry>;
+
+function bytesToBase64(bytes: Uint8Array) {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + chunk, bytes.length)));
+  }
+  return btoa(binary);
+}
+
+async function panelManifest(env: Env): Promise<PanelManifest> {
+  const response = await env.ASSETS.fetch(new Request("https://assets.local/panel-manifest.json"));
+  if (!response.ok) throw new Error(`Panel frontend manifest could not be loaded. HTTP ${response.status}`);
+  const manifest = (await response.json().catch(() => null)) as PanelManifest | null;
+  if (!manifest || typeof manifest !== "object" || !manifest["/index.html"]) {
+    throw new Error("Panel frontend manifest is empty or invalid.");
+  }
+  for (const [path, entry] of Object.entries(manifest)) {
+    if (!path.startsWith("/") || path.includes("..") || !/^[a-f0-9]{32}$/i.test(entry.hash) ||
+        !Number.isSafeInteger(entry.size) || entry.size < 0) {
+      throw new Error(`Invalid panel asset manifest entry: ${path}`);
+    }
+  }
+  return manifest;
+}
+
+async function uploadPanelAssets(token: string, accountId: string, name: string, env: Env) {
+  const manifest = await panelManifest(env);
+  const session = await cf(token, `/accounts/${accountId}/workers/scripts/${name}/assets-upload-session`, {
+    method: "POST",
+    body: JSON.stringify({ manifest }),
+  });
+  let completionToken = String(session?.jwt || "");
+  const buckets = Array.isArray(session?.buckets) ? (session.buckets as string[][]) : [];
+  if (!completionToken) throw new Error("Cloudflare did not return an assets upload token.");
+
+  const hashToPath = new Map<string, string>();
+  for (const [path, entry] of Object.entries(manifest)) hashToPath.set(entry.hash, path);
+
+  for (const bucket of buckets) {
+    const form = new FormData();
+    for (const hash of bucket) {
+      const path = hashToPath.get(hash);
+      if (!path) throw new Error(`Unknown panel asset hash: ${hash}`);
+      const response = await env.ASSETS.fetch(new Request(`https://assets.local/panel-dist${path}`));
+      if (!response.ok) throw new Error(`Panel asset could not be loaded: ${path} (HTTP ${response.status})`);
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (bytes.byteLength !== manifest[path].size) {
+        throw new Error(`Panel asset size mismatch: ${path}`);
+      }
+      form.append(hash, bytesToBase64(bytes));
+    }
+
+    const response = await fetch(`${CF_API}/accounts/${accountId}/workers/assets/upload?base64=true`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${completionToken}` },
+      body: form,
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || body?.success === false || !body?.result?.jwt) {
+      throw new Error(body?.errors?.[0]?.message || `Cloudflare asset upload failed with HTTP ${response.status}`);
+    }
+    completionToken = String(body.result.jwt);
+  }
+  return completionToken;
+}
+
 async function uploadWorker(
   token: string,
   accountId: string,
@@ -470,6 +536,7 @@ async function uploadWorker(
   password: string,
   subdomain: string,
   source: string,
+  assetCompletionToken: string,
 ) {
   const panelUrl = panelUrlFor(name, subdomain);
 
@@ -539,6 +606,13 @@ async function uploadWorker(
         text: password,
       },
     ],
+    assets: {
+      jwt: assetCompletionToken,
+      config: {
+        not_found_handling: "single-page-application",
+        run_worker_first: ["/api/*"],
+      },
+    },
     observability: { enabled: true },
   };
 
@@ -818,6 +892,15 @@ export class DeployJob implements DurableObject {
       await this.set(step);
       const source = await panelSource(this.env);
 
+      step = "assets";
+      await this.set(step);
+      const assetCompletionToken = await uploadPanelAssets(
+        token,
+        accountId,
+        name,
+        this.env,
+      );
+
       step = "script";
       await this.set(step);
       await uploadWorker(
@@ -830,6 +913,7 @@ export class DeployJob implements DurableObject {
         password,
         subdomain,
         source,
+        assetCompletionToken,
       );
 
       step = "script_verify";
