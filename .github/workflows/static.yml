@@ -36,7 +36,6 @@ jobs:
           rm -rf .panel-source
           mkdir -p .panel-source
           unzip -q panel-source.zip -d .panel-source
-
           PANEL_ROOT="$(find .panel-source -mindepth 1 -maxdepth 4 -type d -name frontend -print -quit | xargs -r dirname)"
           test -n "$PANEL_ROOT"
           test -d "$PANEL_ROOT/frontend"
@@ -44,52 +43,40 @@ jobs:
           echo "PANEL_ROOT=$PANEL_ROOT" >> "$GITHUB_ENV"
 
       - name: Install panel dependencies
-        shell: bash
         run: npm install --prefix "${PANEL_ROOT}" --no-audit --no-fund
 
-      - name: Adapt panel for generated password
+      - name: Patch panel initial admin password
         shell: bash
         run: |
           set -euo pipefail
-
           python3 <<'PY'
           from pathlib import Path
           import os
-
           root = Path(os.environ["PANEL_ROOT"])
 
           p = root / "worker/src/lib/env.ts"
           s = p.read_text(encoding="utf-8")
           if "INITIAL_ADMIN_PASSWORD" not in s:
-              old = "  PUBLIC_BASE_URL: string;"
-              new = "  PUBLIC_BASE_URL: string;\n  INITIAL_ADMIN_PASSWORD: string;"
-              if old not in s:
-                  raise SystemExit(f"Could not patch {p}: PUBLIC_BASE_URL not found")
-              s = s.replace(old, new, 1)
+              marker = "  PUBLIC_BASE_URL: string;"
+              if marker not in s:
+                  raise SystemExit("Could not patch env.ts")
+              s = s.replace(marker, marker + "\n  INITIAL_ADMIN_PASSWORD: string;", 1)
           p.write_text(s, encoding="utf-8")
 
           p = root / "worker/src/routes/auth.ts"
           s = p.read_text(encoding="utf-8")
-          if 'if (password !== "admin") {' in s:
-              s = s.replace(
-                  'if (password !== "admin") {',
-                  'if (password !== c.env.INITIAL_ADMIN_PASSWORD) {',
-                  1,
-              )
-          if 'await bcrypt.hash("admin", 12)' in s:
-              s = s.replace(
-                  'await bcrypt.hash("admin", 12)',
-                  'await bcrypt.hash(c.env.INITIAL_ADMIN_PASSWORD, 12)',
-                  1,
-              )
+          s = s.replace('if (password !== "admin") {', 'if (password !== c.env.INITIAL_ADMIN_PASSWORD) {', 1)
+          s = s.replace('await bcrypt.hash("admin", 12)', 'await bcrypt.hash(c.env.INITIAL_ADMIN_PASSWORD, 12)', 1)
           p.write_text(s, encoding="utf-8")
 
           p = root / "frontend/src/pages/Login.tsx"
           if p.exists():
               s = p.read_text(encoding="utf-8")
-              old = '<span className="text-slate-500">{t("auth.defaultPassword")}</span> <strong className="font-mono text-slate-100">admin</strong>'
-              new = '<span className="text-slate-500">Use the initial password provided by the deployer.</span>'
-              s = s.replace(old, new, 1)
+              s = s.replace(
+                  '<span className="text-slate-500">{t("auth.defaultPassword")}</span> <strong className="font-mono text-slate-100">admin</strong>',
+                  '<span className="text-slate-500">Use the initial password provided by the deployer.</span>',
+                  1,
+              )
               p.write_text(s, encoding="utf-8")
           PY
 
@@ -97,54 +84,34 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           python3 <<'PY'
           from pathlib import Path
-          import os
-          import re
-
+          import os, re
           p = Path(os.environ["PANEL_ROOT"]) / "frontend/vite.config.ts"
           s = p.read_text(encoding="utf-8")
-
-          # Remove the malformed literal backslash-n base line from the old workflow,
-          # and remove any normal base property if one already exists.
           s = s.replace(r'\n    base: "/",', '')
-          s = re.sub(r'(?m)^\s*base\s*:\s*["\'][^"\']*["\']\s*,?\s*$', '', s)
-
-          marker = "return {"
-          if marker not in s:
-              raise SystemExit(f"Unexpected Vite config: {p}")
-
-          # This is a real newline in the generated TypeScript file.
-          s = s.replace(marker, 'return {\n    base: "/",', 1)
+          s = re.sub(r'(?m)^\s*base\s*:\s*["\'][^"\']*["\'],?\s*$', '', s)
+          if "return {" not in s:
+              raise SystemExit("Unexpected panel Vite config")
+          s = s.replace("return {", 'return {\n    base: "/",', 1)
           p.write_text(s, encoding="utf-8")
           PY
-
-          grep -n -A4 -B2 'return {' "${PANEL_ROOT}/frontend/vite.config.ts"
-
           npm run build --prefix "${PANEL_ROOT}/frontend"
           test -s "${PANEL_ROOT}/frontend/dist/index.html"
-
           python3 <<'PY'
           from pathlib import Path
           import os
-
           html = (Path(os.environ["PANEL_ROOT"]) / "frontend/dist/index.html").read_text(encoding="utf-8")
-
           if "PIXEL &amp; PING" not in html and "Pixel &amp; Ping" not in html and "Pixel & Ping" not in html:
-              raise SystemExit("Panel dist index.html does not look like the real Pixel & Ping panel.")
-
-          if "pixel-and-ping-deployer1" in html:
-              raise SystemExit("Panel dist contains the deployer base path.")
-
-          print("Verified panel index.html is the real panel.")
+              raise SystemExit("Real panel HTML was not produced")
+          if "PIXEL & PING — Deploy" in html or "pixel-and-ping-deployer1" in html:
+              raise SystemExit("Deployer HTML leaked into panel build")
           PY
 
       - name: Build real panel Worker bundle
         shell: bash
         run: |
           set -euo pipefail
-
           cat > "${PANEL_ROOT}/worker/wrangler.panel-build.jsonc" <<'JSON'
           {
             "$schema": "node_modules/wrangler/config-schema.json",
@@ -154,46 +121,31 @@ jobs:
             "compatibility_flags": ["nodejs_compat"]
           }
           JSON
-
           rm -rf .panel-generated
           mkdir -p .panel-generated
-
           cd "${PANEL_ROOT}/worker"
-
-          npx wrangler@4.131.1 deploy \
-            --dry-run \
-            --outfile "${GITHUB_WORKSPACE}/.panel-generated/worker.js" \
-            --config wrangler.panel-build.jsonc
-
+          npx wrangler@4.131.1 deploy --dry-run --outfile "${GITHUB_WORKSPACE}/.panel-generated/worker.js" --config wrangler.panel-build.jsonc
           test -s "${GITHUB_WORKSPACE}/.panel-generated/worker.js"
-          echo "Panel Worker bundle created successfully."
 
-      - name: Install deployer frontend
-        working-directory: frontend
-        run: npm install --no-audit --no-fund
-
-      - name: Prepare panel assets
+      - name: Create self-contained panel bundle
         shell: bash
         run: |
           set -euo pipefail
-
-          rm -rf frontend/public/panel-dist
           rm -rf frontend/public/__pixelping_panel
           mkdir -p frontend/public/__pixelping_panel
-
-          cp .panel-generated/worker.js worker/src/assets/panel-worker.bundle.txt
           cp -R "${PANEL_ROOT}/frontend/dist/." frontend/public/__pixelping_panel/
-
+          cp .panel-generated/worker.js worker/src/assets/panel-worker.bundle.txt
           test -s frontend/public/__pixelping_panel/index.html
-
           python3 <<'PY'
           from pathlib import Path
-          import hashlib
-          import json
-
+          import hashlib, json
           root = Path("frontend/public/__pixelping_panel")
+          html = (root / "index.html").read_text(encoding="utf-8")
+          if "PIXEL &amp; PING" not in html and "Pixel &amp; Ping" not in html and "Pixel & Ping" not in html:
+              raise SystemExit("Panel index verification failed")
+          if "PIXEL & PING — Deploy" in html or "pixel-and-ping-deployer1" in html:
+              raise SystemExit("Deployer HTML detected in panel bundle")
           manifest = {}
-
           for f in sorted(root.rglob("*")):
               if f.is_file():
                   data = f.read_bytes()
@@ -201,103 +153,121 @@ jobs:
                       "hash": hashlib.sha256(data).hexdigest()[:32],
                       "size": len(data),
                   }
-
-          if "/index.html" not in manifest:
-              raise SystemExit("Panel build missing index.html")
-
-          Path("frontend/public/panel-manifest.json").write_text(
-              json.dumps(manifest, separators=(",", ":")),
-              encoding="utf-8",
-          )
+          Path("frontend/public/panel-manifest.json").write_text(json.dumps(manifest, separators=(",", ":")), encoding="utf-8")
+          print(f"Verified {len(manifest)} real panel assets")
           PY
 
-          python3 <<'PY'
-          from pathlib import Path
-
-          html = Path("frontend/public/__pixelping_panel/index.html").read_text(encoding="utf-8")
-
-          if "PIXEL &amp; PING" not in html and "Pixel &amp; Ping" not in html and "Pixel & Ping" not in html:
-              raise SystemExit("Staged panel index.html is not the real panel.")
-
-          if "pixel-and-ping-deployer1" in html:
-              raise SystemExit("Staged panel index.html contains deployer content.")
-
-          print("Panel assets staged successfully.")
-          PY
-
-          test -s frontend/public/panel-manifest.json
-          test -s worker/src/assets/panel-worker.bundle.txt
-
-          python3 <<'PY'
-          from pathlib import Path
-          import json
-          import re
-
-          manifest = json.loads(Path("frontend/public/panel-manifest.json").read_text(encoding="utf-8"))
-          if not manifest:
-              raise SystemExit("Panel asset manifest is empty.")
-          for path, entry in manifest.items():
-              if not re.fullmatch(r"[0-9a-f]{32}", str(entry.get("hash", "")), re.I):
-                  raise SystemExit(f"Invalid 32-hex asset hash for {path}")
-          print(f"Verified {len(manifest)} panel asset manifest entries.")
-          PY
-
-      - name: Point deployer asset loader at panel staging directory
+      - name: Patch deployer asset loader
         shell: bash
         run: |
           set -euo pipefail
-
           python3 <<'PY'
           from pathlib import Path
-
           p = Path("worker/src/index.ts")
           s = p.read_text(encoding="utf-8")
-
-          old = "https://assets.local/panel-dist${path}"
-          new = "https://assets.local/__pixelping_panel${path}"
-
+          old = 'https://assets.local/panel-dist${path}'
+          new = 'https://assets.local/__pixelping_panel${path}'
           if old not in s:
-              raise SystemExit("Expected panel asset loader URL was not found.")
-
+              raise SystemExit("Panel asset loader marker not found")
           s = s.replace(old, new, 1)
           p.write_text(s, encoding="utf-8")
           PY
 
-          grep -F '__pixelping_panel${path}' worker/src/index.ts
-
-      - name: Harden panel asset deployment
+      - name: Add hard panel verification and ASSETS binding
         shell: bash
         run: |
           set -euo pipefail
-
           python3 <<'PY'
           from pathlib import Path
-
           p = Path("worker/src/index.ts")
           s = p.read_text(encoding="utf-8")
 
-          # The user panel Worker uses the Workers Static Assets collection.
-          # Declare the binding explicitly in the multipart metadata.
-          old_bindings = '    bindings: [\n      { type: "d1", name: "DB", database_id: d1Id },'
-          new_bindings = '    bindings: [\n      { type: "assets", name: "ASSETS" },\n      { type: "d1", name: "DB", database_id: d1Id },'
-          if old_bindings in s and '{ type: "assets", name: "ASSETS" }' not in s:
-              s = s.replace(old_bindings, new_bindings, 1)
-          elif '{ type: "assets", name: "ASSETS" }' not in s:
-              raise SystemExit("Could not locate Worker bindings block.")
+          bindings = '    bindings: [\n      { type: "d1", name: "DB", database_id: d1Id },'
+          if '{ type: "assets", name: "ASSETS" }' not in s:
+              if bindings not in s:
+                  raise SystemExit("Worker bindings block not found")
+              s = s.replace(bindings, '    bindings: [\n      { type: "assets", name: "ASSETS" },\n      { type: "d1", name: "DB", database_id: d1Id },', 1)
 
-          # Never allow SPA fallback from the deployer to silently turn a
-          # missing staged panel asset into the deployer homepage.
-          marker = '  const manifest = (await response.json().catch(() => null)) as PanelManifest | null;\n  if (!manifest || typeof manifest !== "object" || !manifest["/index.html"]) {\n    throw new Error("Panel frontend manifest is empty or invalid.");\n  }'
-          injected = '  const manifest = (await response.json().catch(() => null)) as PanelManifest | null;\n  if (!manifest || typeof manifest !== "object" || !manifest["/index.html"]) {\n    throw new Error("Panel frontend manifest is empty or invalid.");\n  }\n\n  const indexResponse = await env.ASSETS.fetch(\n    new Request("https://assets.local/__pixelping_panel/index.html"),\n  );\n  const indexHtml = await indexResponse.text();\n  if (\n    !indexResponse.ok ||\n    !/Pixel\\s*&(?:amp;)?\\s*Ping/i.test(indexHtml) ||\n    /PIXEL\\s*&\\s*PING\\s*[—-]\\s*Deploy/i.test(indexHtml)\n  ) {\n    throw new Error(\n      "Staged panel index.html verification failed: deployer HTML or invalid panel HTML was returned.",\n    );\n  }'
+          marker = '''  if (!manifest || typeof manifest !== "object" || !manifest["/index.html"]) {
+          throw new Error("Panel frontend manifest is empty or invalid.");
+          }'''
+          check = '''  if (!manifest || typeof manifest !== "object" || !manifest["/index.html"]) {
+          throw new Error("Panel frontend manifest is empty or invalid.");
+          }
+          const panelIndex = await env.ASSETS.fetch(
+          new Request("https://assets.local/__pixelping_panel/index.html"),
+          );
+          const panelHtml = await panelIndex.text();
+          if (
+          !panelIndex.ok ||
+          !/Pixel\\s*&(?:amp;)?\\s*Ping/i.test(panelHtml) ||
+          /PIXEL\\s*&\\s*PING\\s*[—-]\\s*Deploy/i.test(panelHtml)
+          ) {
+          throw new Error("Panel asset verification failed: deployer HTML was returned instead of the real panel.");
+          }'''
           if marker not in s:
-              raise SystemExit("Could not locate panel manifest validation block.")
-          s = s.replace(marker, injected, 1)
+              raise SystemExit("Panel manifest validation marker not found")
+          s = s.replace(marker, check, 1)
 
           p.write_text(s, encoding="utf-8")
           PY
 
-          grep -F '{ type: "assets", name: "ASSETS" }' worker/src/index.ts
-          grep -F '__pixelping_panel/index.html' worker/src/index.ts
+      - name: Add post-deploy panel HTML verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          p = Path("worker/src/index.ts")
+          s = p.read_text(encoding="utf-8")
+          marker = '''async function healthCheck(url: string) {'''
+          fn = '''async function verifyPanelFrontend(url: string) {
+          let last = "no response";
+          for (let i = 0; i < 12; i++) {
+          try {
+          const response = await fetch(`${url}/`, { headers: { accept: "text/html" } });
+          const type = response.headers.get("content-type") || "";
+          const html = await response.text();
+          const isPanel =
+          /Pixel\\s*&(?:amp;)?\\s*Ping/i.test(html) &&
+          !/PIXEL\\s*&\\s*PING\\s*[—-]\\s*Deploy/i.test(html) &&
+          !html.includes("pixel-and-ping-deployer1");
+          if (response.ok && type.toLowerCase().includes("text/html") && isPanel) return;
+          last = `HTTP ${response.status}; content-type=${type}`;
+          } catch (error) {
+          last = error instanceof Error ? error.message : String(error);
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          }
+          throw new Error(`Panel frontend verification failed: ${last}`);
+          }
+          '''
+          if "async function verifyPanelFrontend" not in s:
+              if marker not in s:
+                  raise SystemExit("healthCheck marker not found")
+              s = s.replace(marker, fn + marker, 1)
+          old = '''       step = "health";
+          await this.set(step);
+          await healthCheck(panelUrl);
+
+          step = "admin";'''
+          new = '''       step = "health";
+          await this.set(step);
+          await healthCheck(panelUrl);
+          step = "frontend";
+          await this.set(step);
+          await verifyPanelFrontend(panelUrl);
+
+          step = "admin";'''
+          if old not in s:
+              raise SystemExit("Deployment health block not found")
+          s = s.replace(old, new, 1)
+          p.write_text(s, encoding="utf-8")
+          PY
+
+      - name: Install deployer dependencies
+        working-directory: frontend
+        run: npm install --no-audit --no-fund
 
       - name: Build deployer frontend
         working-directory: frontend
@@ -305,7 +275,7 @@ jobs:
           VITE_API_BASE_URL: https://pixel-and-ping-deployer1.fbtby.workers.dev
         run: npm run build
 
-      - name: Verify build outputs
+      - name: Verify final deployer artifact
         shell: bash
         run: |
           set -euo pipefail
@@ -313,7 +283,16 @@ jobs:
           test -s frontend/dist/panel-manifest.json
           test -s frontend/dist/__pixelping_panel/index.html
           test -s worker/src/assets/panel-worker.bundle.txt
-          echo "All build outputs are present."
+          python3 <<'PY'
+          from pathlib import Path
+          deployer = Path("frontend/dist/index.html").read_text(encoding="utf-8")
+          panel = Path("frontend/dist/__pixelping_panel/index.html").read_text(encoding="utf-8")
+          if "PIXEL & PING — Deploy" not in deployer:
+              raise SystemExit("Deployer index verification failed")
+          if "PIXEL & PING — Deploy" in panel or "pixel-and-ping-deployer1" in panel:
+              raise SystemExit("Panel artifact contains deployer HTML")
+          print("Final artifact verified: deployer and panel HTML are separate.")
+          PY
 
       - name: Install Wrangler
         run: npm install --global wrangler@4.131.1
@@ -337,15 +316,12 @@ jobs:
     name: Publish GitHub Pages
     runs-on: ubuntu-latest
     needs: deploy-worker
-
     permissions:
       pages: write
       id-token: write
-
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-
     steps:
       - name: Deploy Pages
         id: deployment
