@@ -2,8 +2,7 @@ name: Deploy PIXEL & PING
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -19,81 +18,163 @@ jobs:
   deploy-worker:
     name: Deploy PIXEL & PING Worker
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: frontend/package.json
 
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm install
-
-      - name: Prepare panel Worker bundle
+      - name: Prepare real panel source
         shell: bash
         run: |
           set -euo pipefail
+          test -s panel-source.zip
+          rm -rf .panel-source
+          mkdir .panel-source
+          unzip -q panel-source.zip -d .panel-source
+          PANEL_ROOT="$(find .panel-source -mindepth 1 -maxdepth 3 -type d -name frontend | head -n 1 | xargs -r dirname)"
+          test -n "$PANEL_ROOT"
+          test -d "$PANEL_ROOT/frontend"
+          test -d "$PANEL_ROOT/worker"
+          echo "PANEL_ROOT=$PANEL_ROOT" >> "$GITHUB_ENV"
 
-          test -f worker/src/assets/panel-worker.bundle.txt
+      - name: Install panel dependencies
+        run: npm install --prefix "${{ env.PANEL_ROOT }}" --no-audit --no-fund
 
-          mkdir -p frontend/public
+      - name: Adapt panel for generated password
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          root = Path(os.environ["PANEL_ROOT"])
 
-          cp \
-            worker/src/assets/panel-worker.bundle.txt \
-            frontend/public/panel-worker.bundle.txt
+          p = root / "worker/src/lib/env.ts"
+          s = p.read_text()
+          if "INITIAL_ADMIN_PASSWORD" not in s:
+              s = s.replace("  PUBLIC_BASE_URL: string;
+",
+                            "  PUBLIC_BASE_URL: string;
+  INITIAL_ADMIN_PASSWORD: string;
+")
+          p.write_text(s)
 
-          test -s frontend/public/panel-worker.bundle.txt
+          p = root / "worker/src/routes/auth.ts"
+          s = p.read_text()
+          s = s.replace('if (password !== "admin") {',
+                        'if (password !== c.env.INITIAL_ADMIN_PASSWORD) {')
+          s = s.replace('const passwordHash = await bcrypt.hash("admin", 12);',
+                        'const passwordHash = await bcrypt.hash(c.env.INITIAL_ADMIN_PASSWORD, 12);')
+          p.write_text(s)
 
-      - name: Build frontend
+          p = root / "frontend/src/pages/Login.tsx"
+          s = p.read_text()
+          s = s.replace(
+              '<span className="text-slate-500">{t("auth.defaultPassword")}</span> <strong className="font-mono text-slate-100">admin</strong>',
+              '<span className="text-slate-500">Use the initial password provided by the deployer.</span>'
+          )
+          p.write_text(s)
+          PY
+
+      - name: Build real panel frontend
+        run: |
+          set -euo pipefail
+          npm run build --prefix "${{ env.PANEL_ROOT }}/frontend"
+          test -s "${{ env.PANEL_ROOT }}/frontend/dist/index.html"
+
+      - name: Build real panel Worker bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "${PANEL_ROOT}/worker/wrangler.panel-build.jsonc" <<'JSON'
+          {
+            "$schema": "node_modules/wrangler/config-schema.json",
+            "name": "pixel-and-ping-panel-build",
+            "main": "src/index.ts",
+            "compatibility_date": "2026-08-31",
+            "compatibility_flags": ["nodejs_compat"]
+          }
+          JSON
+          rm -rf .panel-generated
+          mkdir .panel-generated
+          cd "${PANEL_ROOT}/worker"
+          npx wrangler@4.131.1 deploy --dry-run --outdir "${GITHUB_WORKSPACE}/.panel-generated" --config wrangler.panel-build.jsonc
+          cd "$GITHUB_WORKSPACE"
+          test -s .panel-generated/worker.js
+
+      - name: Install deployer frontend
+        working-directory: frontend
+        run: npm install --no-audit --no-fund
+
+      - name: Prepare panel assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf frontend/public/panel-dist
+          mkdir -p frontend/public/panel-dist
+          cp .panel-generated/worker.js worker/src/assets/panel-worker.bundle.txt
+          cp -R "${PANEL_ROOT}/frontend/dist/." frontend/public/panel-dist/
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json
+          root = Path("frontend/public/panel-dist")
+          manifest = {}
+          for f in sorted(root.rglob("*")):
+              if f.is_file():
+                  data = f.read_bytes()
+                  manifest["/" + f.relative_to(root).as_posix()] = {
+                      "hash": hashlib.md5(data).hexdigest(),
+                      "size": len(data)
+                  }
+          if "/index.html" not in manifest:
+              raise SystemExit("Panel build missing index.html")
+          Path("frontend/public/panel-manifest.json").write_text(
+              json.dumps(manifest, separators=(",", ":"))
+          )
+          PY
+
+      - name: Build deployer frontend
         working-directory: frontend
         env:
           VITE_API_BASE_URL: https://pixel-and-ping-deployer1.fbtby.workers.dev
         run: npm run build
 
-      - name: Verify frontend build
-        shell: bash
+      - name: Verify
         run: |
-          set -euo pipefail
-
-          test -f frontend/dist/index.html
-          test -s frontend/dist/panel-worker.bundle.txt
-
-          echo "Frontend build verified."
+          test -s frontend/dist/index.html
+          test -s frontend/dist/panel-manifest.json
+          test -s frontend/dist/panel-dist/index.html
+          test -s worker/src/assets/panel-worker.bundle.txt
 
       - name: Install Wrangler
         run: npm install --global wrangler@4.131.1
 
-      - name: Verify Wrangler
-        run: wrangler --version
-
-      - name: Deploy Cloudflare Worker
+      - name: Deploy Worker
         working-directory: worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: wrangler deploy
 
-      - name: Upload GitHub Pages artifact
-        uses: actions/upload-pages-artifact@v3
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v4
         with:
           path: frontend/dist
 
   deploy-pages:
-    name: Deploy GitHub Pages
+    name: Publish GitHub Pages
     runs-on: ubuntu-latest
     needs: deploy-worker
-
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-
     steps:
-      - name: Deploy GitHub Pages
+      - uses: actions/deploy-pages@v4
         id: deployment
-        uses: actions/deploy-pages@v4
